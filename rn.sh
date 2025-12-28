@@ -1,204 +1,147 @@
 #!/bin/bash
 # ===============================================
-# RackNerd IPv6 / Docker / UFW 全功能修复工具
+# RackNerd / UFW / Docker 正确兼容修复脚本
+# 不修改 Docker 配置，仅修复 UFW 与 Docker 冲突
 # ===============================================
 
-# ------------------------------
-# 自动检测默认网卡
-# ------------------------------
-IFACE=$(ip -o link show | awk -F': ' '{print $2}' | grep -v lo | head -n1)
+UFW_AFTER="/etc/ufw/after.rules"
 
 # ------------------------------
-# 自动获取主机 IPv6 前缀
-# ------------------------------
-IPV6_PREFIX=$(ip -6 addr show "$IFACE" scope global | awk '{print $2}' | head -n1 | cut -d':' -f1-4)
-IPV6_CUSTOM="$IPV6_PREFIX::$(printf "%x:%x" $RANDOM $RANDOM)"
-IPV6_GATEWAY=$(ip -6 route show default | awk '/default/ {print $3}' | head -n1)
-
-# Docker 配置文件
-DOCKER_CONF="/etc/docker/daemon.json"
-
-# 获取 SSH 端口
-SSH_PORT=$(ss -tnlp | grep sshd | awk '{print $4}' | awk -F':' '{print $NF}' | head -n1)
-
-# ------------------------------
-# 菜单显示
+# 菜单
 # ------------------------------
 show_menu() {
     echo "=============================================="
-    echo "RackNerd IPv6 / Docker / UFW 全功能修复工具"
+    echo "UFW & Docker 正确兼容修复工具"
     echo "=============================================="
-    echo "1) 一键修复 RackNerd IPv6 并配置 UFW 与 Docker（清空 DOCKER 链）"
-    echo "2) 放行指定 UFW 端口（多个端口空格分开）"
-    echo "3) 关闭指定 UFW 端口（多个端口空格分开）"
-    echo "4) 展示 UFW 端口防火墙状态"
+    echo "1) 一键修复 UFW 与 Docker（容器↔宿主↔外网）"
+    echo "2) 放行普通 UFW 入站端口（宿主机用）"
+    echo "3) 关闭普通 UFW 入站端口（宿主机用）"
+    echo "4) 查看 UFW 状态"
+    echo "5) 允许 Docker 容器端口外网访问（ufw route allow）"
+    echo "6) 关闭 Docker 容器端口外网访问（ufw route deny）"
     echo "0) 退出"
     echo "=============================================="
-    read -p "请选择操作 [0-4]: " choice
+    read -p "请选择操作 [0-6]: " choice
 }
 
 # ------------------------------
-# 函数：修复 IPv6 + Docker + 清空 DOCKER 链
-# ------------------------------
-fix_ipv6_docker() {
-    echo "[*] 修复 RackNerd IPv6 ..."
-
-    # 备份 interfaces
-    cp /etc/network/interfaces "/etc/network/interfaces.bak_$(date +%F_%T)"
-    echo "[*] 已备份 interfaces 文件"
-
-    # 写入自定义 IPv6
-    if grep -q "$IPV6_CUSTOM" /etc/network/interfaces; then
-        echo "[*] 自定义 IPv6 已存在，跳过写入。"
-    else
-        cat >> /etc/network/interfaces <<EOF
-
-# =========================
-# RN 自定义 IPv6
-auto $IFACE
-iface $IFACE inet6 static
-    address $IPV6_CUSTOM
-    netmask 64
-    gateway $IPV6_GATEWAY
-# =========================
-EOF
-        echo "[*] 自定义 IPv6 已写入 interfaces 文件"
-    fi
-
-    echo "[⚠️] 注意：使用 ifdown/ifup 会断开远程 SSH 连接"
-    read -p "确认继续？输入 y 回车继续: " confirm
-    if [[ "$confirm" == "y" || "$confirm" == "Y" ]]; then
-        echo "[*] 执行 ifdown/ifup 彻底刷新 IPv6 ..."
-        ifdown $IFACE && ifup $IFACE
-    else
-        echo "[!] 已取消 ifdown/ifup，可手动刷新 IPv6"
-    fi
-
-    # ------------------------------
-    # 配置 Docker 支持 IPv6
-    # ------------------------------
-    echo "[*] 配置 Docker 支持 IPv6 ..."
-    DOCKER_JSON_CONTENT=$(cat <<EOF
-{
-  "ipv6": true,
-  "fixed-cidr-v6": "$IPV6_PREFIX::/64",
-  "iptables": false
-}
-EOF
-)
-
-    echo "$DOCKER_JSON_CONTENT" > $DOCKER_CONF
-    echo "[*] Docker daemon.json 已更新为 IPv6 可用"
-
-    # 清空 Docker 链
-    echo "[*] 清空 Docker 链规则（IPv4/IPv6）..."
-    iptables -F DOCKER-USER 2>/dev/null
-    iptables -F DOCKER 2>/dev/null
-    ip6tables -F DOCKER-USER 2>/dev/null
-    ip6tables -F DOCKER-FORWARD 2>/dev/null
-
-    # 重启 Docker
-    echo "[*] 重启 Docker ..."
-    systemctl restart docker
-    systemctl status docker --no-pager
-
-    echo "[✓] IPv6 + Docker 链修复完成，容器现在应可访问外部网络"
-}
-
-# ------------------------------
-# 函数：安装并配置 UFW
+# 安装 & 启用 UFW
 # ------------------------------
 setup_ufw() {
-    if ! command -v ufw &>/dev/null; then
-        echo "[*] 安装 UFW ..."
+    if ! command -v ufw >/dev/null 2>&1; then
         apt update && apt install -y ufw
     fi
-
     systemctl enable ufw
     ufw --force enable
 }
 
 # ------------------------------
-# 函数：一键修复 IPv6 + Docker + UFW
+# 核心修复：UFW + Docker
 # ------------------------------
-onekey_fix() {
-    fix_ipv6_docker
+fix_ufw_docker() {
     setup_ufw
 
-    # 放行常用端口
-    echo "[*] 放行 SSH、HTTP/HTTPS 等端口"
-    ufw allow "$SSH_PORT"/tcp
-    ufw allow 80/tcp
-    ufw allow 81/tcp
-    ufw allow 443/tcp
-    ufw reload
+    echo "[*] 备份 after.rules"
+    cp "$UFW_AFTER" "${UFW_AFTER}.bak_$(date +%F_%T)"
 
-    echo "[✓] 一键修复完成"
-    ufw status verbose
+    if grep -q "BEGIN UFW AND DOCKER" "$UFW_AFTER"; then
+        echo "[*] Docker 兼容规则已存在，跳过写入"
+    else
+        echo "[*] 写入 UFW & Docker 兼容规则"
+        cat >> "$UFW_AFTER" <<'EOF'
+
+# BEGIN UFW AND DOCKER
+*filter
+:ufw-user-forward - [0:0]
+:ufw-docker-logging-deny - [0:0]
+:DOCKER-USER - [0:0]
+
+-A DOCKER-USER -j ufw-user-forward
+
+-A DOCKER-USER -m conntrack --ctstate RELATED,ESTABLISHED -j RETURN
+-A DOCKER-USER -m conntrack --ctstate INVALID -j DROP
+-A DOCKER-USER -i docker0 -o docker0 -j ACCEPT
+
+-A DOCKER-USER -j RETURN -s 10.0.0.0/8
+-A DOCKER-USER -j RETURN -s 172.16.0.0/12
+-A DOCKER-USER -j RETURN -s 192.168.0.0/16
+
+-A DOCKER-USER -j ufw-docker-logging-deny -m conntrack --ctstate NEW -d 10.0.0.0/8
+-A DOCKER-USER -j ufw-docker-logging-deny -m conntrack --ctstate NEW -d 172.16.0.0/12
+-A DOCKER-USER -j ufw-docker-logging-deny -m conntrack --ctstate NEW -d 192.168.0.0/16
+
+-A DOCKER-USER -j RETURN
+
+-A ufw-docker-logging-deny -m limit --limit 3/min --limit-burst 10 -j LOG --log-prefix "[UFW DOCKER BLOCK] "
+-A ufw-docker-logging-deny -j DROP
+
+COMMIT
+# END UFW AND DOCKER
+EOF
+    fi
+
+    echo "[*] 重启 UFW"
+    systemctl restart ufw
+
+    echo
+    echo "[✓] 修复完成"
+    echo "👉 容器访问宿主机 / 内网端口：无需 ufw allow"
+    echo "👉 Docker 默认端口不对外网开放"
 }
 
 # ------------------------------
-# 函数：放行用户指定端口
+# 普通 UFW 放行（宿主机）
 # ------------------------------
 ufw_allow_ports() {
-    setup_ufw
-    read -p "请输入要放行的端口（空格分隔）: " ports
+    read -p "输入端口（空格分隔）: " ports
     for p in $ports; do
         ufw allow "$p"/tcp
-        echo "[*] 端口 $p 已放行"
     done
     ufw reload
-    ufw status verbose
 }
 
-# ------------------------------
-# 函数：关闭用户指定端口
-# ------------------------------
 ufw_deny_ports() {
-    setup_ufw
-    read -p "请输入要关闭的端口（空格分隔）: " ports
+    read -p "输入端口（空格分隔）: " ports
     for p in $ports; do
         ufw deny "$p"/tcp
-        echo "[*] 端口 $p 已关闭"
     done
     ufw reload
+}
+
+ufw_status() {
     ufw status verbose
 }
 
 # ------------------------------
-# 函数：展示 UFW 状态
+# Docker 外网端口控制
 # ------------------------------
-ufw_status() {
-    echo "========================"
-    echo "[*] 当前 UFW 状态:"
-    ufw status numbered
-    echo "========================"
+docker_allow_port() {
+    read -p "容器端口: " port
+    read -p "协议 tcp/udp [tcp]: " proto
+    proto=${proto:-tcp}
+    ufw route allow proto "$proto" from any to any port "$port"
+    ufw reload
+}
+
+docker_deny_port() {
+    read -p "容器端口: " port
+    read -p "协议 tcp/udp [tcp]: " proto
+    proto=${proto:-tcp}
+    ufw route deny proto "$proto" from any to any port "$port"
+    ufw reload
 }
 
 # ------------------------------
 # 主逻辑
 # ------------------------------
 show_menu
-
 case "$choice" in
-1)
-    onekey_fix
-    ;;
-2)
-    ufw_allow_ports
-    ;;
-3)
-    ufw_deny_ports
-    ;;
-4)
-    ufw_status
-    ;;
-0)
-    echo "[*] 退出"
-    exit 0
-    ;;
-*)
-    echo "[!] 无效选项"
-    exit 1
-    ;;
+1) fix_ufw_docker ;;
+2) ufw_allow_ports ;;
+3) ufw_deny_ports ;;
+4) ufw_status ;;
+5) docker_allow_port ;;
+6) docker_deny_port ;;
+0) exit 0 ;;
+*) echo "无效选项" ;;
 esac
