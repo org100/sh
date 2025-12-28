@@ -1,18 +1,12 @@
 #!/bin/bash
 # =====================================================
-# RackNerd / UFW / Docker 正确兼容修复脚本（最终版）
-# ✔ 容器可访问宿主机全部端口
-# ✔ 外网访问 Docker 容器端口（支持多端口）
+# RackNerd / UFW / Docker 完整兼容修复脚本（最终版）
 # ✔ 不修改 Docker 配置
+# ✔ 容器可访问宿主机全部端口
+# ✔ 外网访问容器端口通过 ufw route 控制
 # =====================================================
 
 UFW_AFTER="/etc/ufw/after.rules"
-
-# -----------------------------------------------------
-# 自动检测 docker0 网段
-# -----------------------------------------------------
-DOCKER_NET=$(ip -4 addr show docker0 | awk '/inet / {print $2}' | cut -d/ -f1)
-DOCKER_SUBNET=$(ip -4 addr show docker0 | awk '/inet / {print $2}')
 
 # -----------------------------------------------------
 # 菜单
@@ -22,9 +16,9 @@ show_menu() {
     echo "================================================="
     echo "        UFW & Docker 正确兼容管理工具"
     echo "================================================="
-    echo "1) 一键修复 UFW 与 Docker（推荐首次执行）"
-    echo "2) 放行普通 UFW 入站端口（宿主机服务）"
-    echo "3) 关闭普通 UFW 入站端口（宿主机服务）"
+    echo "1) 一键修复 UFW 与 Docker（首次执行）"
+    echo "2) 放行宿主端口（普通 UFW）"
+    echo "3) 关闭宿主端口（普通 UFW）"
     echo "4) 查看 UFW 状态"
     echo "5) 允许 Docker 容器端口外网访问"
     echo "6) 关闭 Docker 容器端口外网访问"
@@ -54,6 +48,11 @@ fix_ufw_docker() {
     echo "[*] 备份 $UFW_AFTER"
     cp "$UFW_AFTER" "${UFW_AFTER}.bak_$(date +%F_%H-%M-%S)"
 
+    # 自动获取 docker0 网桥子网
+    DOCKER_SUBNET=$(ip -4 addr show docker0 | awk '/inet / {print $2}')
+    DOCKER_GATEWAY=$(echo "$DOCKER_SUBNET" | cut -d/ -f1)
+    echo "[*] Docker 网桥: $DOCKER_SUBNET 网关: $DOCKER_GATEWAY"
+
     if grep -q "BEGIN UFW AND DOCKER" "$UFW_AFTER"; then
         echo "[*] Docker 兼容规则已存在，跳过写入"
     else
@@ -76,13 +75,13 @@ fix_ufw_docker() {
 # 容器之间通信
 -A DOCKER-USER -i docker0 -o docker0 -j ACCEPT
 
-# 容器访问宿主机全部端口
--A DOCKER-USER -s $DOCKER_SUBNET -d $DOCKER_NET -j RETURN
-
 # 允许内网 / Docker 网段访问宿主
 -A DOCKER-USER -j RETURN -s 10.0.0.0/8
 -A DOCKER-USER -j RETURN -s 172.16.0.0/12
 -A DOCKER-USER -j RETURN -s 192.168.0.0/16
+
+# 允许容器访问宿主机全部端口
+-A DOCKER-USER -s $DOCKER_SUBNET -d $DOCKER_GATEWAY -j RETURN
 
 # 阻止 Docker 私网被外部直接访问（除非 ufw route allow）
 -A DOCKER-USER -j ufw-docker-logging-deny -m conntrack --ctstate NEW -d 10.0.0.0/8
@@ -109,7 +108,7 @@ EOF
     echo "-------------------------------------------------"
     echo "✔ 容器 → 宿主 / 内网：无需 ufw allow"
     echo "✔ Docker 端口默认不对外网开放"
-    echo "✔ 外网访问容器端口请使用：菜单 5/6"
+    echo "✔ 外网访问容器需使用：ufw route allow"
     echo "-------------------------------------------------"
 }
 
@@ -117,7 +116,7 @@ EOF
 # 普通宿主机端口管理
 # -----------------------------------------------------
 ufw_allow_ports() {
-    read -p "输入要放行的宿主端口（空格分隔）: " ports
+    read -p "输入宿主端口（空格分隔）: " ports
     for p in $ports; do
         ufw allow "$p"/tcp
     done
@@ -125,7 +124,7 @@ ufw_allow_ports() {
 }
 
 ufw_delete_ports() {
-    read -p "输入要关闭的宿主端口（空格分隔）: " ports
+    read -p "输入宿主端口（空格分隔）: " ports
     for p in $ports; do
         for port in $ports; do
             ufw delete allow "$port"/tcp
@@ -139,24 +138,25 @@ ufw_status() {
 }
 
 # -----------------------------------------------------
-# Docker 外网端口控制（真正的外部访问）
+# Docker 容器端口外网访问控制
+# 支持批量端口
 # -----------------------------------------------------
-docker_allow_port() {
-    read -p "输入要放行的容器端口（空格分隔）: " ports
+docker_allow_ports() {
+    read -p "输入容器端口（空格分隔）: " ports
     read -p "协议 tcp/udp [tcp]: " proto
     proto=${proto:-tcp}
-    for port in $ports; do
-        ufw route allow proto "$proto" from any to any port "$port"
+    for p in $ports; do
+        ufw route allow proto "$proto" from any to any port "$p"
     done
     ufw reload
 }
 
-docker_deny_port() {
-    read -p "输入要关闭的容器端口（空格分隔）: " ports
+docker_deny_ports() {
+    read -p "输入容器端口（空格分隔）: " ports
     read -p "协议 tcp/udp [tcp]: " proto
     proto=${proto:-tcp}
-    for port in $ports; do
-        ufw route delete allow proto "$proto" from any to any port "$port"
+    for p in $ports; do
+        ufw route delete allow proto "$proto" from any to any port "$p"
     done
     ufw reload
 }
@@ -170,8 +170,8 @@ case "$choice" in
     2) ufw_allow_ports ;;
     3) ufw_delete_ports ;;
     4) ufw_status ;;
-    5) docker_allow_port ;;
-    6) docker_deny_port ;;
+    5) docker_allow_ports ;;
+    6) docker_deny_ports ;;
     0) exit 0 ;;
     *) echo "无效选项" ;;
 esac
