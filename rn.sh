@@ -3,7 +3,7 @@
 # RackNerd / UFW / Docker 正确兼容修复脚本（最终版）
 # ✔ 不修改 Docker 配置
 # ✔ 修复 UFW 与 Docker 网络冲突
-# ✔ 容器端口支持一次输入多个端口
+# ✔ 正确区分：宿主端口 / Docker 外网端口
 # =====================================================
 
 UFW_AFTER="/etc/ufw/after.rules"
@@ -136,6 +136,7 @@ docker_allow_port() {
     proto=${proto:-tcp}
 
     for port in $ports; do
+        echo "[*] 允许 Docker 容器端口 $port 外网访问"
         ufw route allow proto "$proto" from any to any port "$port"
     done
     ufw reload
@@ -147,6 +148,7 @@ docker_deny_port() {
     proto=${proto:-tcp}
 
     for port in $ports; do
+        echo "[*] 关闭 Docker 容器端口 $port 外网访问"
         ufw route delete allow proto "$proto" from any to any port "$port"
     done
     ufw reload
