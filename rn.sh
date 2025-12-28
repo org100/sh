@@ -1,6 +1,6 @@
 #!/bin/bash
 # ===============================================
-# RackNerd IPv6 / Docker / UFW 全功能修复工具
+# RackNerd IPv6 / Docker / UFW 全功能安全修复工具
 # ===============================================
 
 # ------------------------------
@@ -26,9 +26,9 @@ SSH_PORT=$(ss -tnlp | grep sshd | awk '{print $4}' | awk -F':' '{print $NF}' | h
 # ------------------------------
 show_menu() {
     echo "=============================================="
-    echo "RackNerd IPv6 / Docker / UFW 全功能修复工具"
+    echo "RackNerd IPv6 / Docker / UFW 全功能安全修复工具"
     echo "=============================================="
-    echo "1) 一键修复 RackNerd IPv6 并配置 UFW 与 Docker（清空 DOCKER 链）"
+    echo "1) 一键修复 RackNerd IPv6 并配置 UFW 与 Docker（保持 DOCKER 链，容器可访问外网）"
     echo "2) 放行指定 UFW 端口（多个端口空格分开）"
     echo "3) 关闭指定 UFW 端口（多个端口空格分开）"
     echo "4) 展示 UFW 端口防火墙状态"
@@ -38,9 +38,9 @@ show_menu() {
 }
 
 # ------------------------------
-# 函数：修复 IPv6 + Docker + 清空 DOCKER 链
+# 函数：修复 IPv6
 # ------------------------------
-fix_ipv6_docker() {
+fix_ipv6() {
     echo "[*] 修复 RackNerd IPv6 ..."
 
     # 备份 interfaces
@@ -73,28 +73,23 @@ EOF
     else
         echo "[!] 已取消 ifdown/ifup，可手动刷新 IPv6"
     fi
+}
 
-    # Docker 配置 iptables=false
-    if grep -q '"iptables"' "$DOCKER_CONF"; then
-        sed -i 's/"iptables".*$/  "iptables": false,/' "$DOCKER_CONF"
-    else
-        sed -i 's/}/,\n  "iptables": false\n}/' "$DOCKER_CONF"
+# ------------------------------
+# 函数：修复 Docker 网络
+# ------------------------------
+fix_docker_network() {
+    echo "[*] 修复 Docker 网络，保证容器可访问外网 ..."
+
+    # 删除 daemon.json 中可能错误的 iptables 配置
+    if grep -q '"iptables": false' "$DOCKER_CONF"; then
+        echo "[*] 移除 daemon.json 中的 iptables=false 配置"
+        sed -i '/"iptables": false/d' "$DOCKER_CONF"
     fi
-    echo "[*] 已添加 \"iptables\": false 到 $DOCKER_CONF"
 
-    # 清空 Docker 链
-    echo "[*] 清空 Docker 链规则（IPv4/IPv6）..."
-    iptables -F DOCKER-USER 2>/dev/null
-    iptables -F DOCKER 2>/dev/null
-    ip6tables -F DOCKER-USER 2>/dev/null
-    ip6tables -F DOCKER-FORWARD 2>/dev/null
-
-    # 重启 Docker
-    echo "[*] 重启 Docker ..."
+    # 确保 Docker 服务启动
     systemctl restart docker
-    systemctl status docker --no-pager
-
-    echo "[✓] IPv6 + Docker 链修复完成"
+    echo "[✓] Docker 网络已重启"
 }
 
 # ------------------------------
@@ -114,7 +109,8 @@ setup_ufw() {
 # 函数：一键修复 IPv6 + Docker + UFW
 # ------------------------------
 onekey_fix() {
-    fix_ipv6_docker
+    fix_ipv6
+    fix_docker_network
     setup_ufw
 
     # 放行常用端口
