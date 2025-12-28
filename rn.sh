@@ -74,13 +74,21 @@ EOF
         echo "[!] 已取消 ifdown/ifup，可手动刷新 IPv6"
     fi
 
-    # Docker 配置 iptables=false
-    if grep -q '"iptables"' "$DOCKER_CONF"; then
-        sed -i 's/"iptables".*$/  "iptables": false,/' "$DOCKER_CONF"
-    else
-        sed -i 's/}/,\n  "iptables": false\n}/' "$DOCKER_CONF"
-    fi
-    echo "[*] 已添加 \"iptables\": false 到 $DOCKER_CONF"
+    # ------------------------------
+    # 配置 Docker 支持 IPv6
+    # ------------------------------
+    echo "[*] 配置 Docker 支持 IPv6 ..."
+    DOCKER_JSON_CONTENT=$(cat <<EOF
+{
+  "ipv6": true,
+  "fixed-cidr-v6": "$IPV6_PREFIX::/64",
+  "iptables": false
+}
+EOF
+)
+
+    echo "$DOCKER_JSON_CONTENT" > $DOCKER_CONF
+    echo "[*] Docker daemon.json 已更新为 IPv6 可用"
 
     # 清空 Docker 链
     echo "[*] 清空 Docker 链规则（IPv4/IPv6）..."
@@ -94,7 +102,7 @@ EOF
     systemctl restart docker
     systemctl status docker --no-pager
 
-    echo "[✓] IPv6 + Docker 链修复完成"
+    echo "[✓] IPv6 + Docker 链修复完成，容器现在应可访问外部网络"
 }
 
 # ------------------------------
