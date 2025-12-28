@@ -1,14 +1,18 @@
 #!/bin/bash
 # =====================================================
 # RackNerd / UFW / Docker 正确兼容修复脚本（最终版）
-# ✔ Docker 可访问宿主机全部端口
-# ✔ 外网访问容器端口可用 ufw route allow/deny 控制
+# ✔ 容器可访问宿主机全部端口
+# ✔ 外网访问 Docker 容器端口（支持多端口）
 # ✔ 不修改 Docker 配置
 # =====================================================
 
 UFW_AFTER="/etc/ufw/after.rules"
-DOCKER_SUBNET=$(ip -o -4 addr show docker0 | awk '{print $4}')   # docker0 网段
-DOCKER_GATEWAY=$(ip -o -4 addr show docker0 | awk '{print $4}' | cut -d'/' -f1)  # docker0 IP
+
+# -----------------------------------------------------
+# 自动检测 docker0 网段
+# -----------------------------------------------------
+DOCKER_NET=$(ip -4 addr show docker0 | awk '/inet / {print $2}' | cut -d/ -f1)
+DOCKER_SUBNET=$(ip -4 addr show docker0 | awk '/inet / {print $2}')
 
 # -----------------------------------------------------
 # 菜单
@@ -18,7 +22,7 @@ show_menu() {
     echo "================================================="
     echo "        UFW & Docker 正确兼容管理工具"
     echo "================================================="
-    echo "1) 一键修复 UFW 与 Docker（容器 ↔ 宿主 ↔ 外网）"
+    echo "1) 一键修复 UFW 与 Docker（推荐首次执行）"
     echo "2) 放行普通 UFW 入站端口（宿主机服务）"
     echo "3) 关闭普通 UFW 入站端口（宿主机服务）"
     echo "4) 查看 UFW 状态"
@@ -72,8 +76,8 @@ fix_ufw_docker() {
 # 容器之间通信
 -A DOCKER-USER -i docker0 -o docker0 -j ACCEPT
 
-# 容器访问宿主全部端口（docker0 网桥 IP）
--A DOCKER-USER -s ${DOCKER_SUBNET} -d ${DOCKER_GATEWAY} -j RETURN
+# 容器访问宿主机全部端口
+-A DOCKER-USER -s $DOCKER_SUBNET -d $DOCKER_NET -j RETURN
 
 # 允许内网 / Docker 网段访问宿主
 -A DOCKER-USER -j RETURN -s 10.0.0.0/8
@@ -104,8 +108,8 @@ EOF
     echo "[✓] 修复完成"
     echo "-------------------------------------------------"
     echo "✔ 容器 → 宿主 / 内网：无需 ufw allow"
-    echo "✔ Docker 默认端口不对外网开放"
-    echo "✔ 外网访问容器需使用：ufw route allow"
+    echo "✔ Docker 端口默认不对外网开放"
+    echo "✔ 外网访问容器端口请使用：菜单 5/6"
     echo "-------------------------------------------------"
 }
 
@@ -123,7 +127,9 @@ ufw_allow_ports() {
 ufw_delete_ports() {
     read -p "输入要关闭的宿主端口（空格分隔）: " ports
     for p in $ports; do
-        ufw delete allow "$p"/tcp
+        for port in $ports; do
+            ufw delete allow "$port"/tcp
+        done
     done
     ufw reload
 }
@@ -136,10 +142,9 @@ ufw_status() {
 # Docker 外网端口控制（真正的外部访问）
 # -----------------------------------------------------
 docker_allow_port() {
-    read -p "输入要允许外网访问的容器端口（空格分隔）: " ports
+    read -p "输入要放行的容器端口（空格分隔）: " ports
     read -p "协议 tcp/udp [tcp]: " proto
     proto=${proto:-tcp}
-
     for port in $ports; do
         ufw route allow proto "$proto" from any to any port "$port"
     done
@@ -147,10 +152,9 @@ docker_allow_port() {
 }
 
 docker_deny_port() {
-    read -p "输入要禁止外网访问的容器端口（空格分隔）: " ports
+    read -p "输入要关闭的容器端口（空格分隔）: " ports
     read -p "协议 tcp/udp [tcp]: " proto
     proto=${proto:-tcp}
-
     for port in $ports; do
         ufw route delete allow proto "$proto" from any to any port "$port"
     done
