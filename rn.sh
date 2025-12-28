@@ -25,7 +25,7 @@ show_menu() {
 }
 
 # =====================================================
-# 功能 1：安全修复 RackNerd IPv6 并验证
+# 功能 1：安全修复 RackNerd IPv6 并自动验证
 # =====================================================
 fix_ipv6() {
     echo "[*] 开始安全修复 RackNerd IPv6 配置..."
@@ -65,13 +65,23 @@ EOF
     echo "[*] 重启网络服务..."
     systemctl restart networking
 
-    # 提示验证
+    # 自动验证 IPv6
+    echo "[*] 验证 IPv6 连通性..."
+    if ping6 -c 3 google.com >/dev/null 2>&1; then
+        echo "[✓] IPv6 ping 测试成功"
+    else
+        echo "[⚠️] IPv6 ping 测试失败"
+    fi
+
+    if curl -6 -s --max-time 5 ipv6.ip.sb >/dev/null 2>&1; then
+        echo "[✓] IPv6 curl 测试成功"
+    else
+        echo "[⚠️] IPv6 curl 测试失败"
+    fi
+
     echo
     echo "[✓] IPv6 配置已应用完成"
-    echo "[*] 可通过以下命令验证 IPv6 网络连通性:"
-    echo "  ping6 google.com -c 3"
-    echo "  curl ipv6.ip.sb"
-    echo "[⚠️] 若网络异常，请考虑 reboot 实例"
+    echo "[*] 若网络异常，请考虑 reboot 实例"
 }
 
 # =====================================================
