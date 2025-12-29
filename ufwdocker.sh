@@ -41,9 +41,7 @@ fix_ufw_docker() {
     if ! grep -q "BEGIN UFW AND DOCKER" "$UFW_AFTER"; then
         cat > "$UFW_AFTER" <<'EOF'
 # BEGIN UFW AND DOCKER
-# 说明：
-# 使用 DOCKER-USER 链（ufw-user-forward）来控制 Docker 容器端口访问，
-# 避免 ufw allow 误暴露宿主机端口。
+# 使用 DOCKER-USER 链控制 Docker 容器端口访问
 *filter
 :ufw-user-forward - [0:0]
 :ufw-docker-logging-deny - [0:0]
@@ -69,14 +67,24 @@ EOF
 }
 
 # ==========================
-# 容器端口交互函数（自动列出容器 IP）
+# 容器端口交互函数
 # ==========================
 select_container_ip() {
     local containers ips choice
     containers=($(docker ps --format '{{.Names}}'))
     ips=()
+
+    if [ ${#containers[@]} -eq 0 ]; then
+        echo "❌ 当前没有正在运行的 Docker 容器"
+        echo "请输入 'any' 表示全部容器"
+        read -rp "容器 IP / 名称: " choice
+        echo "$choice"
+        return
+    fi
+
     for c in "${containers[@]}"; do
         ip=$(docker inspect -f '{{range .NetworkSettings.Networks}}{{.IPAddress}}{{end}}' "$c")
+        [ -z "$ip" ] && ip="未分配IP"
         ips+=("$c:$ip")
     done
 
@@ -93,7 +101,7 @@ select_container_ip() {
             if [ "$choice" -eq 0 ]; then
                 echo "any"
             else
-                echo "${ips[$((choice-1))]##*:}" # 返回 IP
+                echo "${ips[$((choice-1))]##*:}"
             fi
             return
         else
