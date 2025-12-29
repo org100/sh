@@ -1,9 +1,16 @@
 #!/usr/bin/env bash
 set -e
 
+########################
+# 基础配置
+########################
 UFW_AFTER="/etc/ufw/after.rules"
 BACKUP_DIR="/root/ufw-backup"
+SCRIPT_NAME="Docker + UFW 防火墙管理脚本"
 
+########################
+# 基础函数
+########################
 require_root() {
     if [ "$EUID" -ne 0 ]; then
         echo "❌ 请使用 root 运行"
@@ -16,12 +23,13 @@ pause() {
 }
 
 get_ssh_port() {
-    local port
-    port=$(ss -tnlp | awk '/ssh/ && /LISTEN/ {print $4}' | awk -F: '{print $NF}' | head -n1)
-    echo "${port:-22}"
+    ss -tnlp 2>/dev/null | awk '/ssh/ && /LISTEN/ {print $4}' | awk -F: '{print $NF}' | head -n1 || echo 22
 }
 
-install_ufw_and_fix() {
+########################
+# 核心功能
+########################
+fix_ufw_docker() {
     echo "▶ 修复 docker + ufw"
 
     apt update -y
@@ -73,8 +81,7 @@ EOF
     ufw --force enable
     systemctl restart ufw
 
-    echo "✔ 修复完成（如未生效请重启服务器）"
-    pause
+    echo "✔ 修复完成（如规则未生效请重启服务器）"
 }
 
 input_ports() {
@@ -82,42 +89,38 @@ input_ports() {
     echo "$PORTS"
 }
 
-allow_docker_ports() {
-    PORTS=$(input_ports)
+allow_docker() {
+    PORTS=${*:-$(input_ports)}
     for p in $PORTS; do
         ufw route allow proto tcp to any port "$p"
-        echo "✔ Docker 端口已开放: $p"
+        echo "✔ Docker 外网端口已开放: $p"
     done
-    pause
 }
 
-deny_docker_ports() {
-    PORTS=$(input_ports)
+deny_docker() {
+    PORTS=${*:-$(input_ports)}
     for p in $PORTS; do
         ufw delete route allow proto tcp to any port "$p" 2>/dev/null || true
-        echo "✔ Docker 端口已关闭: $p"
+        echo "✔ Docker 外网端口已关闭: $p"
     done
-    pause
 }
 
-allow_all_ports() {
-    PORTS=$(input_ports)
+allow_all() {
+    PORTS=${*:-$(input_ports)}
     for p in $PORTS; do
         ufw allow "$p"
         ufw route allow proto tcp to any port "$p"
         echo "✔ 宿主机 + Docker 端口已开放: $p"
     done
-    pause
 }
 
-deny_all_ports() {
-    PORTS=$(input_ports)
+deny_all() {
+    PORTS=${*:-$(input_ports)}
     for p in $PORTS; do
         ufw delete allow "$p" 2>/dev/null || true
         ufw delete route allow proto tcp to any port "$p" 2>/dev/null || true
         echo "✔ 宿主机 + Docker 端口已关闭: $p"
     done
-    pause
 }
 
 reset_all() {
@@ -136,38 +139,76 @@ reset_all() {
     iptables -X
 
     systemctl restart docker
-
-    echo "✔ 系统已完全还原"
-    pause
+    echo "✔ 已彻底还原"
 }
 
+########################
+# 数字菜单
+########################
+menu() {
+    while true; do
+        clear
+        echo "=============================="
+        echo " $SCRIPT_NAME "
+        echo "=============================="
+        echo
+        echo "1) 修复 docker + ufw"
+        echo "2) 开放 Docker 容器 外网端口"
+        echo "3) 关闭 Docker 容器 外网端口"
+        echo "4) 开放 宿主机 + 容器 端口"
+        echo "5) 关闭 宿主机 + 容器 端口"
+        echo "6) 完全还原（卸载 ufw / 清空规则 / 重启 docker）"
+        echo
+        echo "0) 退出"
+        echo
+        read -rp "请选择 [0-6]: " CHOICE
+
+        case "$CHOICE" in
+            1) fix_ufw_docker; pause ;;
+            2) allow_docker; pause ;;
+            3) deny_docker; pause ;;
+            4) allow_all; pause ;;
+            5) deny_all; pause ;;
+            6) reset_all; pause ;;
+            0) exit 0 ;;
+            *) echo "无效选择"; sleep 1 ;;
+        esac
+    done
+}
+
+########################
+# 程序入口
+########################
 require_root
 
-while true; do
-    clear
-    echo "=============================="
-    echo " Docker + UFW 防火墙管理菜单 "
-    echo "=============================="
-    echo
-    echo "1) 修复 docker + ufw（安装 ufw / 放行 SSH / 写入规则）"
-    echo "2) 开放 Docker 容器 外网端口"
-    echo "3) 关闭 Docker 容器 外网端口"
-    echo "4) 开放 宿主机 + 容器 端口"
-    echo "5) 关闭 宿主机 + 容器 端口"
-    echo "6) 完全还原（卸载 ufw / 清空规则 / 重启 docker）"
-    echo
-    echo "0) 退出"
-    echo
-    read -rp "请选择 [0-6]: " CHOICE
-
-    case "$CHOICE" in
-        1) install_ufw_and_fix ;;
-        2) allow_docker_ports ;;
-        3) deny_docker_ports ;;
-        4) allow_all_ports ;;
-        5) deny_all_ports ;;
-        6) reset_all ;;
-        0) exit 0 ;;
-        *) echo "无效选项"; pause ;;
-    esac
-done
+case "$1" in
+    "")              # curl 直连 / 无参数 → 数字菜单
+        menu
+        ;;
+    fix)
+        fix_ufw_docker
+        ;;
+    allow-docker)
+        shift
+        allow_docker "$@"
+        ;;
+    deny-docker)
+        shift
+        deny_docker "$@"
+        ;;
+    allow-all)
+        shift
+        allow_all "$@"
+        ;;
+    deny-all)
+        shift
+        deny_all "$@"
+        ;;
+    reset)
+        reset_all
+        ;;
+    *)
+        echo "❌ 未知命令"
+        exit 1
+        ;;
+esac
