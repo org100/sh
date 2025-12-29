@@ -2,13 +2,17 @@
 set -e
 
 UFW_AFTER="/etc/ufw/after.rules"
-BACKUP_DIR="/root/ufw-backup-$(date +%s)"
+BACKUP_DIR="/root/ufw-backup"
 
 require_root() {
     if [ "$EUID" -ne 0 ]; then
         echo "❌ 请使用 root 运行"
         exit 1
     fi
+}
+
+pause() {
+    read -rp "按回车继续..."
 }
 
 get_ssh_port() {
@@ -18,7 +22,7 @@ get_ssh_port() {
 }
 
 install_ufw_and_fix() {
-    echo "▶ 修复 docker + ufw 环境"
+    echo "▶ 修复 docker + ufw"
 
     apt update -y
     apt install -y ufw
@@ -27,14 +31,13 @@ install_ufw_and_fix() {
     cp -a /etc/ufw "$BACKUP_DIR/" 2>/dev/null || true
 
     SSH_PORT=$(get_ssh_port)
-    echo "✔ 检测到 SSH 端口: $SSH_PORT"
+    echo "✔ SSH 端口: $SSH_PORT"
 
     ufw default deny incoming
     ufw default allow outgoing
     ufw allow "$SSH_PORT"/tcp
 
     if ! grep -q "BEGIN UFW AND DOCKER" "$UFW_AFTER"; then
-        echo "▶ 写入 Docker + UFW after.rules"
         cat >> "$UFW_AFTER" <<'EOF'
 
 # BEGIN UFW AND DOCKER
@@ -70,44 +73,60 @@ EOF
     ufw --force enable
     systemctl restart ufw
 
-    echo "✔ 修复完成，如规则未生效请重启服务器"
+    echo "✔ 修复完成（如未生效请重启服务器）"
+    pause
+}
+
+input_ports() {
+    read -rp "请输入端口（多个用空格分隔）: " PORTS
+    echo "$PORTS"
 }
 
 allow_docker_ports() {
-    for p in "$@"; do
+    PORTS=$(input_ports)
+    for p in $PORTS; do
         ufw route allow proto tcp to any port "$p"
-        echo "✔ 已开放 Docker 外网端口: $p"
+        echo "✔ Docker 端口已开放: $p"
     done
+    pause
 }
 
 deny_docker_ports() {
-    for p in "$@"; do
+    PORTS=$(input_ports)
+    for p in $PORTS; do
         ufw delete route allow proto tcp to any port "$p" 2>/dev/null || true
-        echo "✔ 已关闭 Docker 外网端口: $p"
+        echo "✔ Docker 端口已关闭: $p"
     done
+    pause
 }
 
 allow_all_ports() {
-    for p in "$@"; do
+    PORTS=$(input_ports)
+    for p in $PORTS; do
         ufw allow "$p"
         ufw route allow proto tcp to any port "$p"
-        echo "✔ 已开放 宿主机 + Docker 端口: $p"
+        echo "✔ 宿主机 + Docker 端口已开放: $p"
     done
+    pause
 }
 
 deny_all_ports() {
-    for p in "$@"; do
+    PORTS=$(input_ports)
+    for p in $PORTS; do
         ufw delete allow "$p" 2>/dev/null || true
         ufw delete route allow proto tcp to any port "$p" 2>/dev/null || true
-        echo "✔ 已关闭 宿主机 + Docker 端口: $p"
+        echo "✔ 宿主机 + Docker 端口已关闭: $p"
     done
+    pause
 }
 
 reset_all() {
-    echo "⚠ 正在完全还原系统（不可逆）"
+    echo "⚠ 即将完全还原系统（不可逆）"
+    read -rp "确认请输入 YES: " CONFIRM
+    [ "$CONFIRM" = "YES" ] || return
 
-    ufw --force reset 2>/dev/null || true
-    systemctl stop ufw 2>/dev/null || true
+    ufw --force reset || true
+    systemctl stop ufw || true
     apt purge -y ufw
     rm -rf /etc/ufw
 
@@ -118,56 +137,37 @@ reset_all() {
 
     systemctl restart docker
 
-    echo "✔ 已彻底还原系统防火墙"
+    echo "✔ 系统已完全还原"
+    pause
 }
 
 require_root
 
-case "$1" in
-    fix)
-        install_ufw_and_fix
-        ;;
-    allow-docker)
-        shift
-        allow_docker_ports "$@"
-        ;;
-    deny-docker)
-        shift
-        deny_docker_ports "$@"
-        ;;
-    allow-all)
-        shift
-        allow_all_ports "$@"
-        ;;
-    deny-all)
-        shift
-        deny_all_ports "$@"
-        ;;
-    reset)
-        reset_all
-        ;;
-    *)
-        echo
-        echo "Docker + UFW 防火墙管理脚本"
-        echo
-        echo "用法:"
-        echo "  $0 <命令> [端口...]"
-        echo
-        echo "命令说明:"
-        echo "  fix           修复 docker + ufw 问题（安装 ufw、放行 SSH、写入 after.rules）"
-        echo "  allow-docker  仅开放 Docker 容器 外网端口"
-        echo "  deny-docker   仅关闭 Docker 容器 外网端口"
-        echo "  allow-all     同时开放 宿主机 + 容器 端口"
-        echo "  deny-all      同时关闭 宿主机 + 容器 端口"
-        echo "  reset         完全还原：卸载 ufw、清空规则、重启 docker"
-        echo
-        echo "示例:"
-        echo "  $0 fix"
-        echo "  $0 allow-docker 80 443"
-        echo "  $0 deny-docker 80"
-        echo "  $0 allow-all 8080"
-        echo "  $0 reset"
-        echo
-        exit 1
-        ;;
-esac
+while true; do
+    clear
+    echo "=============================="
+    echo " Docker + UFW 防火墙管理菜单 "
+    echo "=============================="
+    echo
+    echo "1) 修复 docker + ufw（安装 ufw / 放行 SSH / 写入规则）"
+    echo "2) 开放 Docker 容器 外网端口"
+    echo "3) 关闭 Docker 容器 外网端口"
+    echo "4) 开放 宿主机 + 容器 端口"
+    echo "5) 关闭 宿主机 + 容器 端口"
+    echo "6) 完全还原（卸载 ufw / 清空规则 / 重启 docker）"
+    echo
+    echo "0) 退出"
+    echo
+    read -rp "请选择 [0-6]: " CHOICE
+
+    case "$CHOICE" in
+        1) install_ufw_and_fix ;;
+        2) allow_docker_ports ;;
+        3) deny_docker_ports ;;
+        4) allow_all_ports ;;
+        5) deny_all_ports ;;
+        6) reset_all ;;
+        0) exit 0 ;;
+        *) echo "无效选项"; pause ;;
+    esac
+done
