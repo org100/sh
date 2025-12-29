@@ -47,28 +47,21 @@ EOF
 }
 
 # ==========================
-# 统一的容器选择逻辑 (修复显示 + 编号映射)
+# 统一的容器选择逻辑 (强制显示 + 编号映射)
 # ==========================
 select_container_ip() {
     echo -e "\n\033[32m--- 实时 Docker 容器列表 ---\033[0m"
-    
     local map_file="/tmp/ufw_docker_map"
     rm -f "$map_file"
-
     local i=1
     printf "\033[33m%-3s | %-20s | %-15s | %s\033[0m\n" "ID" "NAMES" "IP" "STATUS"
     
-    # 获取所有容器名，并逐一通过 inspect 获取详情
     while read -r name; do
         [ -z "$name" ] && continue
         local ip=$(docker inspect -f '{{range .NetworkSettings.Networks}}{{.IPAddress}}{{end}}' "$name" | head -n 1)
         [ -z "$ip" ] && ip="Internal"
         local status=$(docker inspect -f '{{.State.Status}}' "$name")
-        
-        # 强制立即打印到终端 /dev/tty
         printf "%-3d | %-20s | %-15s | %s\n" "$i" "$name" "$ip" "$status" > /dev/tty
-        
-        # 存入映射文件供后续编号匹配
         echo "$i|$ip|$name" >> "$map_file"
         i=$((i+1))
     done <<< "$(docker ps -a --format "{{.Names}}")"
@@ -80,106 +73,81 @@ select_container_ip() {
     while true; do
         read -rp "请选择编号 (ID) 或直接输入容器名 [默认 0 = any]: " choice
         choice=${choice:-0}
-
         if [ "$choice" == "0" ] || [ "$choice" == "any" ]; then
-            rm -f "$map_file"
-            echo "any"
-            return
+            rm -f "$map_file"; echo "any"; return
         fi
-
-        # 检查是否是数字 ID
         if [[ "$choice" =~ ^[0-9]+$ ]]; then
             local res=$(grep "^$choice|" "$map_file" | cut -d'|' -f2 || true)
-            local cname=$(grep "^$choice|" "$map_file" | cut -d'|' -f3 || true)
             if [ -n "$res" ]; then
-                echo -e "\033[32m✔ 已选择: $cname ($res)\033[0m" > /dev/tty
-                rm -f "$map_file"
-                echo "$res"
-                return
+                rm -f "$map_file"; echo "$res"; return
             fi
         fi
-
-        # 检查是否直接输入了容器名
         if docker inspect "$choice" >/dev/null 2>&1; then
             local res=$(docker inspect -f '{{range .NetworkSettings.Networks}}{{.IPAddress}}{{end}}' "$choice" | head -n 1)
-            rm -f "$map_file"
-            echo "${res:-any}"
-            return
+            rm -f "$map_file"; echo "${res:-any}"; return
         fi
-
-        echo "❌ 输入无效，请重新输入编号或名称。"
+        echo "❌ 输入无效，请重新输入。"
     done
 }
 
-ask_port() {
-    local p
-    read -rp "请输入端口 (例如 81, 留空默认为 any): " p
-    echo "${p:-any}"
-}
-
 # ==========================
-# 2) 开放容器端口
+# 2) 开放容器端口 (支持多端口)
 # ==========================
 allow_docker() {
     echo "▶ 只开放 Docker 容器端口 (不影响宿主机)"
     local ip=$(select_container_ip)
-    local port=$(ask_port)
+    read -rp "请输入端口 (支持空格分隔，如 80 443，留空为 any): " ports
+    ports=${ports:-any}
     
-    if [ "$ip" == "any" ] && [ "$port" == "any" ]; then
-        ufw route allow from any to any
-    elif [ "$ip" == "any" ]; then
-        ufw route allow proto tcp from any to any port "$port"
-    elif [ "$port" == "any" ]; then
-        ufw route allow from any to "$ip"
-    else
-        ufw route allow proto tcp from any to "$ip" port "$port"
-    fi
-    echo "✔ 规则已成功添加。"
+    for port in $ports; do
+        if [ "$ip" == "any" ] && [ "$port" == "any" ]; then
+            ufw route allow from any to any
+        elif [ "$ip" == "any" ]; then
+            ufw route allow proto tcp from any to any port "$port"
+        elif [ "$port" == "any" ]; then
+            ufw route allow from any to "$ip"
+        else
+            ufw route allow proto tcp from any to "$ip" port "$port"
+        fi
+        echo "✔ 已添加规则: To: $ip Port: $port"
+    done
 }
 
 # ==========================
-# 3) 关闭容器端口
+# 3) 关闭容器端口 (支持多端口)
 # ==========================
 deny_docker() {
     echo "▶ 只关闭 Docker 容器端口 (不影响宿主机)"
     local ip=$(select_container_ip)
-    local port=$(ask_port)
+    read -rp "请输入端口 (支持空格分隔，如 80 443，留空为 any): " ports
+    ports=${ports:-any}
     
-    if [ "$ip" == "any" ] && [ "$port" == "any" ]; then
-        ufw route delete allow from any to any 2>/dev/null || true
-    elif [ "$ip" == "any" ]; then
-        ufw route delete allow proto tcp from any to any port "$port" 2>/dev/null || true
-    elif [ "$port" == "any" ]; then
-        ufw route delete allow from any to "$ip" 2>/dev/null || true
-    else
-        ufw route delete allow proto tcp from any to "$ip" port "$port" 2>/dev/null || true
-    fi
-    echo "✔ 尝试删除规则完成。"
+    for port in $ports; do
+        if [ "$ip" == "any" ] && [ "$port" == "any" ]; then
+            ufw route delete allow from any to any 2>/dev/null || true
+        elif [ "$ip" == "any" ]; then
+            ufw route delete allow proto tcp from any to any port "$port" 2>/dev/null || true
+        elif [ "$port" == "any" ]; then
+            ufw route delete allow from any to "$ip" 2>/dev/null || true
+        else
+            ufw route delete allow proto tcp from any to "$ip" port "$port" 2>/dev/null || true
+        fi
+        echo "✔ 已处理删除: To: $ip Port: $port"
+    done
 }
 
-# ==========================
-# 4) 开放宿主机 + 容器端口
-# ==========================
 allow_all() {
     echo "▶ 同时开放宿主机 + 容器端口"
     read -rp "请输入端口 (空格分隔): " ports
-    for p in $ports; do ufw allow "$p"; done
-    echo "✔ 宿主机端口已开放。"
+    for p in $ports; do ufw allow "$p"; echo "✔ 开放宿主机端口: $p"; done
 }
 
-# ==========================
-# 5) 关闭宿主机 + 容器端口
-# ==========================
 deny_all() {
     echo "▶ 同时关闭宿主机 + 容器端口"
     read -rp "请输入端口 (空格分隔): " ports
-    for p in $ports; do ufw delete allow "$p" 2>/dev/null || true; done
-    echo "✔ 宿主机规则已清理。"
+    for p in $ports; do ufw delete allow "$p" 2>/dev/null || true; echo "✔ 删除宿主机端口: $p"; done
 }
 
-# ==========================
-# 6) 完全还原
-# ==========================
 reset_all() {
     echo "▶ 正在卸载 UFW 并还原规则..."
     ufw --force disable || true
@@ -189,9 +157,6 @@ reset_all() {
     echo "✔ 系统已还原。"
 }
 
-# ==========================
-# 主菜单
-# ==========================
 menu() {
     clear
     echo "========================================"
