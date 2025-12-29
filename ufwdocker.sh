@@ -13,26 +13,18 @@ pause() {
 }
 
 # ===============================
-# 精确 SSH 端口检测（排除本地回环）
+# SSH 端口检测（最终稳定版）
+# 直接读取 sshd 配置，确保端口准确
 # ===============================
 get_ssh_port() {
     local port
-
-    # 1️⃣ 只取 IPv4 外部监听的 sshd
-    if command -v ss >/dev/null 2>&1; then
-        port=$(ss -lntp 2>/dev/null \
-            | awk '$1=="LISTEN" && $5 !~ /^127\.0\.0\.1/ && $7 ~ /sshd/ {split($5,a,":"); print a[length(a)]; exit}')
+    if command -v sshd >/dev/null 2>&1; then
+        port=$(sshd -T 2>/dev/null | awk '/^port / {print $2; exit}')
     fi
 
-    # 2️⃣ fallback netstat
-    if [ -z "$port" ] && command -v netstat >/dev/null 2>&1; then
-        port=$(netstat -lntp 2>/dev/null \
-            | awk '$6=="LISTEN" && $4 !~ /^127\.0\.0\.1/ && $7 ~ /sshd/ {split($4,a,":"); print a[length(a)]; exit}')
-    fi
-
-    # 3️⃣ fallback
+    # fallback
     if [ -z "$port" ]; then
-        echo "⚠️ 未检测到外部 SSH 端口，使用 22 兜底"
+        echo "⚠️ 未检测到 SSH 端口，使用 22 兜底"
         port=22
     fi
 
@@ -49,7 +41,7 @@ fix_ufw_docker() {
     cp -a /etc/ufw "$BACKUP_DIR/" 2>/dev/null || true
 
     SSH_PORT=$(get_ssh_port)
-    echo "✔ 外部可用 SSH 端口: $SSH_PORT"
+    echo "✔ 检测到 SSH 端口: $SSH_PORT"
 
     echo "▶ 重置 UFW 规则"
     ufw --force reset
@@ -59,10 +51,9 @@ fix_ufw_docker() {
     echo "▶ 放行 SSH 端口 $SSH_PORT"
     ufw allow "$SSH_PORT"/tcp
 
-    # 写入 Docker + UFW after.rules（删除导致 iptables-restore 出错的 \）
+    # 写入 Docker + UFW after.rules（兼容 ufw-init）
     if ! grep -q "BEGIN UFW AND DOCKER" "$UFW_AFTER"; then
-        cat >> "$UFW_AFTER" <<'EOF'
-
+        cat > "$UFW_AFTER" <<'EOF'
 # BEGIN UFW AND DOCKER
 *filter
 :ufw-user-forward - [0:0]
@@ -133,7 +124,7 @@ reset_all() {
 
 menu() {
     clear
-    echo "Docker + UFW 防火墙管理脚本（SSH 精确版）"
+    echo "Docker + UFW 防火墙管理脚本（最终稳定版）"
     echo
     echo "1) 修复 Docker + UFW（自动确认 SSH 端口）"
     echo "2) 仅开放 Docker 容器端口"
