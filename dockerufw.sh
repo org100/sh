@@ -13,11 +13,9 @@ pause() { echo ""; read -rp "按回车继续..." ; }
 check_nftables_compat() {
     echo "▶ 检测防火墙后端..."
     
-    # 检查是否是 nftables 系统
     if [ -f /proc/sys/net/netfilter/nf_tables_api_version ]; then
         echo "✔ 系统支持 nftables"
         
-        # 检查 iptables 实现
         local ipt_version
         ipt_version=$(iptables --version 2>/dev/null || echo "unknown")
         
@@ -43,17 +41,15 @@ check_nftables_compat() {
     return 0
 }
 
-# 验证规则是否真实生效（nftables 兼容性检查）
+# 验证规则是否真实生效
 verify_rules_active() {
     echo ""
     echo "▶ 验证规则是否生效..."
     
-    # 检查 nftables 表
     if command -v nft >/dev/null 2>&1; then
         echo "--- nftables 表列表 ---"
         nft list tables 2>/dev/null || echo "无 nftables 表"
         
-        # 检查是否有 Docker 相关的表
         if nft list table ip filter 2>/dev/null | grep -q DOCKER; then
             echo "✔ Docker 规则已加载到 nftables"
         else
@@ -61,7 +57,6 @@ verify_rules_active() {
         fi
     fi
     
-    # 检查 iptables 规则
     echo ""
     echo "--- iptables DOCKER-USER 链 ---"
     if iptables -L DOCKER-USER -n 2>/dev/null | grep -q "Chain DOCKER-USER"; then
@@ -79,7 +74,7 @@ get_ssh_port() {
     echo "${port:-22}"
 }
 
-# 获取 Docker 网络段（自动检测）
+# 获取 Docker 网络段
 get_docker_network() {
     docker network inspect bridge --format '{{range .IPAM.Config}}{{.Subnet}}{{end}}' 2>/dev/null || echo "172.17.0.0/16"
 }
@@ -94,7 +89,6 @@ get_docker_gateway() {
 fix_ufw_docker() {
     echo "▶ 正在执行环境修复..."
     
-    # 先检查兼容性
     check_nftables_compat
     
     apt update -y && apt install -y ufw nftables
@@ -103,35 +97,31 @@ fix_ufw_docker() {
     echo "✔ 检测到 SSH 端口: $SSH_PORT，正在预放行..."
     ufw allow "$SSH_PORT"/tcp >/dev/null 2>&1 || true
 
-    # 备份原配置
     [ -f "$UFW_AFTER" ] && { mkdir -p "$(dirname "$BACKUP_FILE")"; cp "$UFW_AFTER" "$BACKUP_FILE"; echo "✔ 原配置已备份: $BACKUP_FILE"; }
 
-    # 自动检测 Docker 网络
     DOCKER_SUBNET=$(get_docker_network)
     DOCKER_GW=$(get_docker_gateway)
     echo "✔ 检测到 Docker 网络: $DOCKER_SUBNET (网关: $DOCKER_GW)"
 
-    # 设置 UFW 默认允许转发
     sed -i 's/DEFAULT_FORWARD_POLICY="DROP"/DEFAULT_FORWARD_POLICY="ACCEPT"/' /etc/default/ufw
 
-    # DOCKER-USER 链规则（兼容 iptables-nft）
     cat > "$UFW_AFTER" <<EOF
 *filter
 :ufw-user-forward - [0:0]
 :ufw-docker-logging-deny - [0:0]
 :DOCKER-USER - [0:0]
 
-# 宿主机 <-> 容器互通（自动检测的网络）
+# 宿主机 <-> 容器互通
 -A DOCKER-USER -s $DOCKER_SUBNET -d $DOCKER_GW -j ACCEPT
 -A DOCKER-USER -s $DOCKER_GW -d $DOCKER_SUBNET -j ACCEPT
 
-# 局域网全放行（内网信任域）
+# 局域网全放行
 -A DOCKER-USER -s 10.0.0.0/8 -j RETURN
 -A DOCKER-USER -s 172.16.0.0/12 -j RETURN
 -A DOCKER-USER -s 192.168.0.0/16 -j RETURN
 -A DOCKER-USER -p udp --sport 53 --dport 1024:65535 -j RETURN
 
-# 默认规则（外网流量交由 UFW 控制）
+# 默认规则
 -A DOCKER-USER -j ufw-user-forward
 -A DOCKER-USER -j ufw-docker-logging-deny
 -A ufw-docker-logging-deny -m limit --limit 3/min --limit-burst 10 -j LOG --log-prefix "[UFW DOCKER BLOCK] "
@@ -139,13 +129,11 @@ fix_ufw_docker() {
 COMMIT
 EOF
 
-    # 重启服务（确保 nftables 兼容层正确加载）
     ufw --force enable
     systemctl restart docker
     sleep 2
     systemctl restart ufw
     
-    # 验证规则
     verify_rules_active
     
     echo ""
@@ -157,8 +145,6 @@ EOF
     echo "  - 外网访问: UFW 精确控制"
     echo "  - SSH端口 $SSH_PORT: 已放行"
     echo "========================================="
-    echo ""
-    echo "💡 提示：如遇到规则不生效，执行选项 9 进行诊断"
 }
 
 # ==========================
@@ -211,7 +197,6 @@ select_container_ip() {
     done
 }
 
-# 检查 iptables 规则是否存在（兼容 nftables）
 check_iptables_rule_exists() {
     local target_ip=$1
     local port=$2
@@ -219,7 +204,7 @@ check_iptables_rule_exists() {
 }
 
 # ==========================
-# 只操作容器端口 (仅 DOCKER-USER 链)
+# 端口管理逻辑
 # ==========================
 manage_container_only() {
     local action=$1
@@ -231,21 +216,14 @@ manage_container_only() {
         return 1
     }
 
-    read -rp "请输入端口 (空格分隔, 如: 80 443): " port_input
+    read -rp "请输入端口 (空格分隔): " port_input
     local ports=(${port_input// / })
     [ ${#ports[@]} -eq 0 ] && { echo "❌ 端口不能为空"; return 1; }
 
     for p in "${ports[@]}"; do
-        [ -z "$p" ] && continue
-        
-        if ! [[ "$p" =~ ^[0-9]+$ ]] || [ "$p" -lt 1 ] || [ "$p" -gt 65535 ]; then
-            echo "❌ 无效端口: $p (必须是 1-65535)"
-            continue
-        fi
-
         if [ "$action" == "allow" ]; then
             if check_iptables_rule_exists "$target_ip" "$p"; then
-                echo "⚠️  容器规则已存在，跳过: $target_ip:$p"
+                echo "⚠️  容器规则已存在: $target_ip:$p"
             else
                 iptables -I DOCKER-USER 1 -p tcp -d "$target_ip" --dport "$p" -j ACCEPT
                 echo "✔ 已添加容器规则: $target_ip:$p"
@@ -253,192 +231,115 @@ manage_container_only() {
         else
             if iptables -D DOCKER-USER -p tcp -d "$target_ip" --dport "$p" -j ACCEPT 2>/dev/null; then
                 echo "✔ 已删除容器规则: $target_ip:$p"
-            else
-                echo "⚠️  容器规则不存在，跳过: $target_ip:$p"
             fi
         fi
     done
-    
-    echo ""
-    echo "💡 提示：容器规则仅控制外网→容器，内网访问始终放行"
 }
 
-# ==========================
-# 同时操作宿主机+容器端口
-# ==========================
 manage_host_and_container() {
     local action=$1
     local target_ip=$2
     local port_input
 
-    SSH_PORT=$(get_ssh_port)
-    ufw allow "$SSH_PORT"/tcp >/dev/null 2>&1 || true
-
-    read -rp "请输入端口 (空格分隔, 如: 80 443 8080): " port_input
+    read -rp "请输入端口 (空格分隔): " port_input
     local ports=(${port_input// / })
     [ ${#ports[@]} -eq 0 ] && { echo "❌ 端口不能为空"; return 1; }
 
     for p in "${ports[@]}"; do
-        [ -z "$p" ] && continue
-        
-        if ! [[ "$p" =~ ^[0-9]+$ ]] || [ "$p" -lt 1 ] || [ "$p" -gt 65535 ]; then
-            echo "❌ 无效端口: $p"
-            continue
-        fi
-
-        echo "正在处理: $p ..."
-
         if [ "$action" == "allow" ]; then
-            # UFW 宿主机规则
-            if ufw allow "$p"/tcp >/dev/null 2>&1; then
-                echo "  ✔ 宿主机规则: $p/tcp"
+            ufw allow "$p"/tcp >/dev/null 2>&1
+            if [ "$target_ip" != "any" ] && [ -n "$target_ip" ]; then
+                iptables -I DOCKER-USER 1 -p tcp -d "$target_ip" --dport "$p" -j ACCEPT
             fi
-            
-            # DOCKER-USER 容器规则（如果指定了 IP）
-            if [ "$target_ip" != "any" ] && [ "$target_ip" != "no-ip" ] && [ -n "$target_ip" ]; then
-                if check_iptables_rule_exists "$target_ip" "$p"; then
-                    echo "  ⚠️  容器规则已存在: $target_ip:$p"
-                else
-                    iptables -I DOCKER-USER 1 -p tcp -d "$target_ip" --dport "$p" -j ACCEPT
-                    echo "  ✔ 容器规则: $target_ip:$p"
-                fi
-            fi
+            echo "✔ 已开放: $p"
         else
-            # 删除 UFW 规则（精确匹配）
-            local deleted=0
+            # 删除宿主机规则
             while true; do
-                rule_num=$(ufw status numbered 2>/dev/null | grep -E "^\[[0-9]+\].*ALLOW.*$p/tcp" | head -n 1 | awk -F'[][]' '{print $2}')
+                rule_num=$(ufw status numbered | grep -E "^\[[0-9]+\].*$p/tcp" | head -n 1 | awk -F'[][]' '{print $2}')
                 [ -z "$rule_num" ] && break
-                echo "y" | ufw delete "$rule_num" >/dev/null 2>&1 && deleted=1
+                echo "y" | ufw delete "$rule_num" >/dev/null 2>&1
             done
-            [ "$deleted" -eq 1 ] && echo "  ✔ 已删除宿主机规则: $p/tcp" || echo "  ⚠️  宿主机无规则: $p/tcp"
-            
-            # 删除 DOCKER-USER 规则
-            if [ "$target_ip" != "any" ] && [ "$target_ip" != "no-ip" ] && [ -n "$target_ip" ]; then
-                if iptables -D DOCKER-USER -p tcp -d "$target_ip" --dport "$p" -j ACCEPT 2>/dev/null; then
-                    echo "  ✔ 已删除容器规则: $target_ip:$p"
-                else
-                    echo "  ⚠️  容器无规则: $target_ip:$p"
-                fi
+            # 删除容器规则
+            if [ "$target_ip" != "any" ]; then
+                iptables -D DOCKER-USER -p tcp -d "$target_ip" --dport "$p" -j ACCEPT 2>/dev/null || true
             fi
+            echo "✔ 已关闭: $p"
         fi
     done
-    
-    echo ""
-    echo "✔ 操作完成！"
 }
 
 # ==========================
-# 持久化规则（兼容 nftables）
+# 规则持久化与查看
 # ==========================
 save_iptables_rules() {
     echo "▶ 正在持久化防火墙规则..."
-    
-    # 检查是否使用 nftables
-    if iptables --version 2>/dev/null | grep -q "nf_tables"; then
-        echo "ℹ️  检测到 nftables 后端"
-        
-        # nftables 持久化
+    if iptables --version | grep -q "nf_tables"; then
         if command -v nft >/dev/null 2>&1; then
             mkdir -p /etc/nftables
-            nft list ruleset > /etc/nftables/ruleset.nft 2>/dev/null || true
-            echo "✔ nftables 规则已保存到 /etc/nftables/ruleset.nft"
+            nft list ruleset > /etc/nftables/ruleset.nft
+            echo "✔ nftables 规则已保存"
         fi
     fi
-    
-    # iptables 持久化
     if command -v netfilter-persistent >/dev/null 2>&1; then
         netfilter-persistent save
         echo "✔ 规则已通过 netfilter-persistent 保存"
-    elif command -v iptables-save >/dev/null 2>&1; then
-        mkdir -p /etc/iptables
-        iptables-save > /etc/iptables/rules.v4 2>/dev/null || true
-        echo "✔ iptables 规则已保存到 /etc/iptables/rules.v4"
     fi
-    
-    echo ""
-    echo "💡 建议安装持久化工具："
-    echo "   apt install iptables-persistent netfilter-persistent"
 }
 
-# ==========================
-# 查看规则
-# ==========================
 show_rules() {
-    echo "========== 系统信息 =========="
-    echo "iptables 版本: $(iptables --version)"
-    echo "Docker 网络: $(get_docker_network) (网关: $(get_docker_gateway))"
-    echo ""
-    
     echo "========== UFW 规则 =========="
     ufw status numbered
     echo ""
-    
     echo "========== DOCKER-USER 链 =========="
-    iptables -L DOCKER-USER -n -v --line-numbers 2>/dev/null || echo "DOCKER-USER 链不存在"
-    echo ""
-    
-    # 如果是 nftables，显示额外信息
-    if command -v nft >/dev/null 2>&1 && iptables --version | grep -q "nf_tables"; then
-        echo "========== nftables 表 (底层) =========="
-        nft list tables 2>/dev/null || echo "无 nftables 表"
-    fi
+    iptables -L DOCKER-USER -n -v --line-numbers 2>/dev/null
+}
+
+diagnose_firewall() {
+    echo "--- 防火墙诊断 ---"
+    iptables --version
+    ufw status
+    iptables -L DOCKER-USER -n | head -n 5
 }
 
 # ==========================
-# 诊断工具（针对 nftables 兼容性问题）
+# 功能 10: RackNerd IPv6 修复
 # ==========================
-diagnose_firewall() {
-    echo "========================================="
-    echo "       防火墙诊断工具 (Debian 13)"
-    echo "========================================="
-    echo ""
+fix_ipv6() {
+    echo "[*] 开始安全修复 RackNerd IPv6 配置..."
+    SYSCTL_CONF="/etc/sysctl.conf"
+    CUSTOM_CONF="/etc/sysctl.d/99-racknerd-ipv6.conf"
     
-    echo "▶ 1. 检测 iptables 后端"
-    iptables --version
-    echo ""
-    
-    echo "▶ 2. 检测 alternatives 配置"
-    update-alternatives --display iptables 2>/dev/null | grep "link currently" || echo "无 alternatives 配置"
-    echo ""
-    
-    echo "▶ 3. 检测 Docker 是否运行"
-    systemctl is-active docker && echo "✔ Docker 运行中" || echo "❌ Docker 未运行"
-    echo ""
-    
-    echo "▶ 4. 检测 UFW 状态"
-    ufw status verbose
-    echo ""
-    
-    echo "▶ 5. 检测 DOCKER-USER 链"
-    if iptables -L DOCKER-USER -n 2>/dev/null | grep -q "Chain DOCKER-USER"; then
-        echo "✔ DOCKER-USER 链存在"
-        iptables -L DOCKER-USER -n -v --line-numbers
-    else
-        echo "❌ DOCKER-USER 链不存在（可能需要重启 Docker）"
+    if [ -f "$SYSCTL_CONF" ]; then
+        cp "$SYSCTL_CONF" "${SYSCTL_CONF}.bak_$(date +%F_%H-%M-%S)"
+        echo "[*] 已备份 $SYSCTL_CONF"
     fi
-    echo ""
+
+    cat > "$CUSTOM_CONF" <<EOF
+# RackNerd IPv6 Fix
+net.ipv6.conf.all.autoconf = 0
+net.ipv6.conf.all.accept_ra = 0
+net.ipv6.conf.eth0.autoconf = 0
+net.ipv6.conf.eth0.accept_ra = 0
+EOF
+    echo "[*] 已写入自定义 IPv6 配置到 $CUSTOM_CONF"
+    echo "[*] 应用 sysctl 配置..."
+    sysctl --system
+    echo "[*] 重启网络服务..."
+    systemctl restart networking || echo "⚠️  网络服务重启失败，建议手动 reboot"
     
-    echo "▶ 6. 检测 nftables 规则（如果使用 nf_tables）"
-    if command -v nft >/dev/null 2>&1 && iptables --version | grep -q "nf_tables"; then
-        echo "当前使用 nftables 后端"
-        nft list ruleset 2>/dev/null | grep -A 5 "DOCKER" || echo "未找到 Docker 相关规则"
+    echo "[*] 验证 IPv6 连通性..."
+    if ping6 -c 3 google.com >/dev/null 2>&1; then
+        echo "[✓] IPv6 ping 测试成功"
     else
-        echo "使用传统 iptables 后端"
+        echo "[⚠️] IPv6 ping 测试失败"
     fi
-    echo ""
     
-    echo "▶ 7. 常见问题修复建议"
-    echo "问题1: 规则不生效"
-    echo "  解决: systemctl restart docker && systemctl restart ufw"
-    echo ""
-    echo "问题2: iptables 命令报错"
-    echo "  解决: update-alternatives --set iptables /usr/sbin/iptables-nft"
-    echo ""
-    echo "问题3: DOCKER-USER 链消失"
-    echo "  解决: docker network ls (触发 Docker 重建链)"
-    echo ""
-    echo "========================================="
+    if curl -6 -s --max-time 5 ipv6.ip.sb >/dev/null 2>&1; then
+        echo "[✓] IPv6 curl 测试成功"
+    else
+        echo "[⚠️] IPv6 curl 测试失败"
+    fi
+    echo "[✓] IPv6 配置处理完成"
 }
 
 # ==========================
@@ -453,15 +354,16 @@ menu() {
     echo "1) 修复 Docker + UFW 环境 (自动检测)"
     echo "2) 开放容器端口 (仅外网→容器)"
     echo "3) 关闭容器端口 (仅外网→容器)"
-    echo "4) 开放宿主机+容器端口 (外网→宿主机+容器)"
-    echo "5) 关闭宿主机+容器端口 (外网→宿主机+容器)"
+    echo "4) 开放宿主机+容器端口 (外网→全通)"
+    echo "5) 关闭宿主机+容器端口 (外网→全封)"
     echo "6) 查看当前防火墙规则"
     echo "7) 持久化规则 (防止重启丢失)"
-    echo "8) 诊断工具 (排查 nftables 兼容性问题)"
+    echo "8) 诊断工具 (排查兼容性问题)"
     echo "9) 完全还原 (卸载 UFW)"
+    echo "10) 安全修复 RackNerd IPv6 并验证"
     echo "0) 退出"
     echo "========================================"
-    read -rp "请选择 [0-9]: " choice
+    read -rp "请选择 [0-10]: " choice
     case "$choice" in
         1) fix_ufw_docker ;;
         2) manage_container_only "allow" "$(select_container_ip)" ;;
@@ -472,17 +374,10 @@ menu() {
         7) save_iptables_rules ;;
         8) diagnose_firewall ;;
         9) 
-            read -rp "⚠️  确认卸载 UFW 并重置防火墙？(yes/no): " confirm
-            if [ "$confirm" == "yes" ]; then
-                ufw --force disable
-                apt purge -y ufw
-                rm -rf /etc/ufw
-                systemctl restart docker
-                echo "✔ UFW 已完全卸载"
-            else
-                echo "❌ 已取消"
-            fi
+            read -rp "⚠️  确认卸载 UFW？(yes/no): " confirm
+            [ "$confirm" == "yes" ] && { ufw --force disable; apt purge -y ufw; systemctl restart docker; }
             ;;
+        10) fix_ipv6 ;;
         0) exit 0 ;;
         *) echo "❌ 无效选择" ;;
     esac
