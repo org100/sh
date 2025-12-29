@@ -46,7 +46,6 @@ fix_ufw_docker() {
     echo "------------------------------------------------"
     ufw allow "$SSH_PORT"/tcp >/dev/null 2>&1 || true
 
-    # 设置 UFW 默认允许转发
     sed -i 's/DEFAULT_FORWARD_POLICY="DROP"/DEFAULT_FORWARD_POLICY="ACCEPT"/' /etc/default/ufw
 
     mkdir -p "$BACKUP_DIR"
@@ -105,7 +104,6 @@ manage_ports() {
         if [ "$action" == "allow" ]; then
             [ "$mode" == "host_and_container" ] && ufw allow "$p"/tcp
             if [ "$target_ip" != "any" ]; then
-                # 在 DOCKER-USER 链插入规则
                 iptables -I DOCKER-USER 1 -p tcp -d "$target_ip" --dport "$p" -j ACCEPT
             fi
         else
@@ -136,7 +134,7 @@ menu() {
     echo "8) 诊断工具 (排查环境问题)"
     echo "9) 完全还原 (卸载 UFW 并清理)"
     echo "10) 修复 RackNerd IPv6"
-    echo "11) 自动识别并放行所有 Docker 网桥 (去重版)"
+    echo "11) 自动识别并放行所有 Docker 真实网桥卡"
     echo "0) 退出"
     echo "========================================"
     read -rp "请选择 [0-11]: " choice
@@ -165,17 +163,28 @@ net.ipv6.conf.$iface.accept_ra = 0
 EOF
             sysctl --system && echo "✔ IPv6 修复完成" ;;
         11) 
-            echo "▶ 正在识别并放行所有 Docker 网桥..."
-            local allowed_subnets=$(ufw status | grep "ALLOW IN" | awk '{print $NF}' | sort -u)
+            echo "▶ 正在识别 Docker 真实网桥卡并放行..."
+            # 抓取所有桥接网络的真实 interface 名字 (如 br-xxxx 或 docker0)
             docker network ls --filter driver=bridge --format "{{.Name}}" | while read -r net; do
-                [ "$net" == "bridge" ] && continue
-                local sub=$(docker network inspect "$net" --format '{{range .IPAM.Config}}{{.Subnet}}{{end}}' 2>/dev/null | grep -oE "\b([0-9]{1,3}\.){3}[0-9]{1,3}/[0-9]{1,2}\b" | head -n 1)
-                if [ -n "$sub" ]; then
-                    if echo "$allowed_subnets" | grep -q "$sub"; then
-                        echo "ℹ️  网段 $sub ($net) 已存在，跳过。"
+                local iface subnet
+                if [ "$net" == "bridge" ]; then
+                    iface="docker0"
+                else
+                    # 关键修复：从 inspect 中提取真实的 Bridge 名称，而不是网络逻辑名
+                    iface=$(docker network inspect "$net" --format '{{index .Options "com.docker.network.bridge.name"}}' 2>/dev/null || echo "")
+                    # 如果没有自定义网桥名，则默认就是 br-<ID前缀>
+                    [ -z "$iface" ] && iface="br-$(docker network inspect "$net" --format '{{.Id}}' | cut -c1-12)"
+                fi
+                
+                subnet=$(docker network inspect "$net" --format '{{range .IPAM.Config}}{{.Subnet}}{{end}}' 2>/dev/null | grep -oE "\b([0-9]{1,3}\.){3}[0-9]{1,3}/[0-9]{1,2}\b" | head -n 1)
+                
+                if [ -n "$iface" ] && [ -n "$subnet" ]; then
+                    # 检查 UFW 是否已经有该网卡的规则
+                    if ufw status | grep -q "$iface"; then
+                        echo "ℹ️  网卡 $iface ($subnet) 规则已存在，跳过。"
                     else
-                        ufw allow in on "$net" from "$sub" && echo "✔ 已新增放行网桥: $net ($sub)"
-                        allowed_subnets="$allowed_subnets $sub"
+                        # 正确地放行真实网卡
+                        ufw allow in on "$iface" from "$subnet" && echo "✔ 已放行真实网卡: $iface ($subnet)"
                     fi
                 fi
             done ;;
