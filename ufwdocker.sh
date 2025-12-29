@@ -28,6 +28,10 @@ fix_ufw_docker() {
     # 设置 UFW 默认允许转发
     sed -i 's/DEFAULT_FORWARD_POLICY="DROP"/DEFAULT_FORWARD_POLICY="ACCEPT"/' /etc/default/ufw
 
+    # 备份原 after.rules
+    [ ! -d "$BACKUP_DIR" ] && mkdir -p "$BACKUP_DIR"
+    [ -f "$UFW_AFTER" ] && cp "$UFW_AFTER" "$BACKUP_DIR/after.rules.bak"
+
     # DOCKER-USER 链规则
     cat > "$UFW_AFTER" <<'EOF'
 # BEGIN UFW AND DOCKER
@@ -35,11 +39,15 @@ fix_ufw_docker() {
 :ufw-user-forward - [0:0]
 :ufw-docker-logging-deny - [0:0]
 :DOCKER-USER - [0:0]
+# 先执行 ufw-user-forward 允许规则
 -A DOCKER-USER -j ufw-user-forward
+# 内网 Docker 网络直接 RETURN
 -A DOCKER-USER -s 10.0.0.0/8 -j RETURN
 -A DOCKER-USER -s 172.16.0.0/12 -j RETURN
 -A DOCKER-USER -s 192.168.0.0/16 -j RETURN
+# 放行 DNS 客户端 UDP 端口
 -A DOCKER-USER -p udp --sport 53 --dport 1024:65535 -j RETURN
+# 日志 + DROP 其他流量
 -A DOCKER-USER -j ufw-docker-logging-deny
 -A ufw-docker-logging-deny -m limit --limit 3/min --limit-burst 10 -j LOG --log-prefix "[UFW DOCKER BLOCK] "
 -A ufw-docker-logging-deny -j DROP
@@ -103,7 +111,7 @@ select_container_ip() {
 }
 
 # ==========================
-# 多端口处理逻辑 (支持删除 any 端口)
+# 多端口处理逻辑
 # ==========================
 process_ports() {
     local action=$1
@@ -113,6 +121,7 @@ process_ports() {
     SSH_PORT=$(get_ssh_port)
     ufw allow "$SSH_PORT"/tcp >/dev/null 2>&1 || true
     [ -z "$target_ip" ] && target_ip="any"
+    echo "DEBUG: target_ip='$target_ip'"
 
     read -rp "请输入端口 (空格分隔，如 80 443 81): " port_input
     local ports=(${port_input// / })
@@ -127,12 +136,25 @@ process_ports() {
                 [ "$p" == "any" ] && ufw route allow from any to any || ufw route allow proto tcp from any to any port "$p"
             else
                 [ "$p" == "any" ] && ufw route allow from any to "$target_ip" || ufw route allow proto tcp from any to "$target_ip" port "$p"
+                # 修复 DOCKER-USER DROP 问题
+                iptables -I DOCKER-USER 1 -p tcp -d "$target_ip" --dport "$p" -j ACCEPT
             fi
         else
-            # 删除规则：使用 ufw delete <编号> 避免 route delete 报错
-            for rule_num in $(ufw status numbered | grep "ALLOW" | grep -E "($p|$target_ip)" | awk -F'[][]' '{print $2}' | sort -rn); do
-                ufw delete "$rule_num" || true
-            done
+            # 删除规则
+            if [ "$target_ip" == "any" ]; then
+                if [ "$p" == "any" ]; then
+                    ufw route delete from any to any || true
+                else
+                    while true; do
+                        rule_num=$(ufw status numbered | grep "ALLOW.*$p" | awk -F'[][]' '{print $2}' | head -n 1)
+                        [ -z "$rule_num" ] && break
+                        ufw route delete "$rule_num" || true
+                    done
+                fi
+            else
+                [ "$p" == "any" ] && ufw route delete from any to "$target_ip" || ufw route delete proto tcp from any to "$target_ip" port "$p" || true
+                iptables -D DOCKER-USER -p tcp -d "$target_ip" --dport "$p" -j ACCEPT || true
+            fi
         fi
     done
     echo "✔ 端口处理完成。"
@@ -159,28 +181,10 @@ menu() {
         1) fix_ufw_docker ;;
         2) process_ports "allow" "$(select_container_ip)" ;;
         3) process_ports "delete" "$(select_container_ip)" ;;
-        4)
-            read -rp "输入端口 (空格分隔): " ps
-            for p in $ps; do ufw allow "$p"; done
-            ;;
-        5)
-            read -rp "输入端口 (空格分隔): " ps
-            for p in $ps; do
-                for rule_num in $(ufw status numbered | grep "ALLOW" | grep -w "$p" | awk -F'[][]' '{print $2}' | sort -rn); do
-                    ufw delete "$rule_num" || true
-                done
-            done
-            ;;
-        6)
-            ufw --force disable
-            apt purge -y ufw
-            rm -rf /etc/ufw
-            systemctl restart docker || true
-            ;;
+        4) read -rp "输入端口: " ps; for p in $ps; do ufw allow "$p"; done ;;
+        5) read -rp "输入端口: " ps; for p in $ps; do ufw delete allow "$p" || true; done ;;
+        6) ufw --force disable && apt purge -y ufw && rm -rf /etc/ufw && systemctl restart docker ;;
         0) exit 0 ;;
-        *)
-            echo "❌ 无效选择"
-            ;;
     esac
     pause
     menu
