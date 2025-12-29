@@ -15,18 +15,36 @@ get_ssh_port() {
 }
 
 # ==========================
-# 修复 Docker + UFW 环境
+# 修复 Docker + UFW 环境 (严格控制端口)
 # ==========================
 fix_ufw_docker() {
     echo "▶ 正在执行环境修复..."
     apt update -y && apt install -y ufw
-    
+
     SSH_PORT=$(get_ssh_port)
     echo "✔ 检测到 SSH 端口: $SSH_PORT，正在预放行..."
     ufw allow "$SSH_PORT"/tcp >/dev/null 2>&1 || true
-    
+
+    # 设置 UFW 默认允许转发
     sed -i 's/DEFAULT_FORWARD_POLICY="DROP"/DEFAULT_FORWARD_POLICY="ACCEPT"/' /etc/default/ufw
 
+    # 确保 DOCKER-USER 链存在并清空
+    iptables -F DOCKER-USER 2>/dev/null || true
+    iptables -N DOCKER-USER 2>/dev/null || true
+
+    # 默认 DROP 所有宿主机到 Docker 容器端口流量
+    iptables -I DOCKER-USER -j DROP
+
+    # 允许特定端口 (修改这里可以增加允许的端口)
+    for p in 80 81 443 30754; do
+        iptables -I DOCKER-USER -p tcp --dport "$p" -j ACCEPT
+    done
+
+    # 允许宿主机访问 Docker 内部网络
+    iptables -I DOCKER-USER -s 172.0.0.0/8 -j RETURN
+    iptables -I DOCKER-USER -s 10.0.0.0/8 -j RETURN
+
+    # 可选：保留原 UFW after.rules 模板（防止 ufw reload 时丢失）
     cat > "$UFW_AFTER" <<'EOF'
 # BEGIN UFW AND DOCKER
 *filter
@@ -44,9 +62,10 @@ fix_ufw_docker() {
 COMMIT
 # END UFW AND DOCKER
 EOF
+
     ufw --force enable
     systemctl restart ufw
-    echo "✔ 环境修复完成，SSH 端口 $SSH_PORT 已安全放行。"
+    echo "✔ 环境修复完成，Docker 对外端口已严格控制，SSH端口 $SSH_PORT 已安全放行。"
 }
 
 # ==========================
@@ -57,17 +76,15 @@ select_container_ip() {
     rm -f "$map_file"
     local i=1
 
-    # 打印标题到终端
     printf "\033[32m--- 实时 Docker 容器列表 ---\033[0m\n" > /dev/tty
     printf "\033[33m%-3s | %-20s | %-15s | %s\033[0m\n" "ID" "NAMES" "IP" "STATUS" > /dev/tty
 
-    # 遍历容器
     while read -r name; do
         [ -z "$name" ] && continue
         local ip
         ip=$(docker inspect -f '{{range .NetworkSettings.Networks}}{{.IPAddress}}{{end}}' "$name" | head -n 1)
         [ -z "$ip" ] && ip="any"
-        ip=$(echo "$ip" | tr -d '[:space:]')  # 去掉空格/换行
+        ip=$(echo "$ip" | tr -d '[:space:]')
         local status
         status=$(docker inspect -f '{{.State.Status}}' "$name")
         printf "%-3d | %-20s | %-15s | %s\n" "$i" "$name" "$ip" "$status" > /dev/tty
@@ -78,7 +95,6 @@ select_container_ip() {
     printf " 0   | any (全部容器)\n" > /dev/tty
     printf "\033[32m----------------------------\033[0m\n" > /dev/tty
 
-    # 用户选择
     local choice res
     while true; do
         read -rp "请选择 ID 或输入容器名 [默认 0 = any]: " choice
@@ -148,7 +164,7 @@ menu() {
     echo "========================================"
     echo "      Docker + UFW 防火墙管理脚本"
     echo "========================================"
-    echo "1) 修复 Docker + UFW 环境 (建议先执行)"
+    echo "1) 修复 Docker + UFW 环境 (严格控制端口)"
     echo "2) 只开放 Docker 容器端口 (ufw route)"
     echo "3) 只关闭 Docker 容器端口 (ufw route)"
     echo "4) 同时开放宿主机 + 容器端口 (ufw allow)"
