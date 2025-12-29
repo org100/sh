@@ -67,15 +67,15 @@ EOF
 }
 
 # ==========================
-# 容器端口交互函数
+# 容器端口交互函数（显示全部容器）
 # ==========================
 select_container_ip() {
     local containers ips choice
-    containers=($(docker ps --format '{{.Names}}'))
+    containers=($(docker ps -a --format '{{.Names}}'))
     ips=()
 
     if [ ${#containers[@]} -eq 0 ]; then
-        echo "❌ 当前没有正在运行的 Docker 容器"
+        echo "❌ 当前没有 Docker 容器"
         echo "请输入 'any' 表示全部容器"
         read -rp "容器 IP / 名称: " choice
         echo "$choice"
@@ -85,12 +85,14 @@ select_container_ip() {
     for c in "${containers[@]}"; do
         ip=$(docker inspect -f '{{range .NetworkSettings.Networks}}{{.IPAddress}}{{end}}' "$c")
         [ -z "$ip" ] && ip="未分配IP"
-        ips+=("$c:$ip")
+        st=$(docker inspect -f '{{.State.Status}}' "$c")
+        ips+=("$c:$ip:$st")
     done
 
-    echo "当前运行的容器:"
+    echo "当前容器列表 (编号 + 名称 + IP + 状态):"
     for i in "${!ips[@]}"; do
-        echo "$((i+1))) ${ips[i]}"
+        IFS=":" read -r name ip st <<< "${ips[$i]}"
+        echo "$((i+1))) $name | IP: $ip | 状态: $st"
     done
     echo "0) any（全部容器）"
 
@@ -101,7 +103,8 @@ select_container_ip() {
             if [ "$choice" -eq 0 ]; then
                 echo "any"
             else
-                echo "${ips[$((choice-1))]##*:}"
+                IFS=":" read -r name ip st <<< "${ips[$((choice-1))]}"
+                echo "$ip"
             fi
             return
         else
