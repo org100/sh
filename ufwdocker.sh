@@ -12,22 +12,32 @@ pause() {
     read -rp "按回车继续..."
 }
 
-# ===== SSH 端口检测（已修复）=====
+# ======================================================
+# ✅ SSH 端口检测（最终修复版）
+# 原则：只相信“当前正在监听的 sshd 端口”
+# ======================================================
 get_ssh_port() {
     local port
 
-    # 1️⃣ sshd -T（最权威）
-    if command -v sshd >/dev/null 2>&1; then
-        port=$(sshd -T 2>/dev/null | awk '/^port / {print $2; exit}')
+    # 1️⃣ 使用 ss（最可靠）
+    if command -v ss >/dev/null 2>&1; then
+        port=$(ss -lntp 2>/dev/null \
+            | awk '/sshd/ && /LISTEN/ {split($4,a,":"); print a[length(a)]; exit}')
     fi
 
-    # 2️⃣ sshd_config
-    if [ -z "$port" ] && [ -f /etc/ssh/sshd_config ]; then
-        port=$(grep -Ei '^\s*Port\s+' /etc/ssh/sshd_config | awk '{print $2}' | head -n1)
+    # 2️⃣ fallback netstat
+    if [ -z "$port" ] && command -v netstat >/dev/null 2>&1; then
+        port=$(netstat -lntp 2>/dev/null \
+            | awk '/sshd/ && /LISTEN/ {split($4,a,":"); print a[length(a)]; exit}')
     fi
 
-    # 3️⃣ fallback
-    echo "${port:-22}"
+    # 3️⃣ 最后兜底
+    if [ -z "$port" ]; then
+        echo "⚠️ 未检测到正在监听的 SSH 端口，使用 22 作为兜底"
+        port=22
+    fi
+
+    echo "$port"
 }
 
 fix_ufw_docker() {
@@ -40,14 +50,18 @@ fix_ufw_docker() {
     cp -a /etc/ufw "$BACKUP_DIR/" 2>/dev/null || true
 
     SSH_PORT=$(get_ssh_port)
-    echo "✔ 检测到 SSH 端口: $SSH_PORT"
+    echo "✔ 当前正在监听的 SSH 端口: $SSH_PORT"
 
+    echo "▶ 重置 UFW 规则"
     ufw --force reset
     ufw default deny incoming
     ufw default allow outgoing
+
+    echo "▶ 放行 SSH 端口 $SSH_PORT"
     ufw allow "$SSH_PORT"/tcp
 
     if ! grep -q "BEGIN UFW AND DOCKER" "$UFW_AFTER"; then
+        echo "▶ 写入 Docker + UFW after.rules"
         cat >> "$UFW_AFTER" <<'EOF'
 
 # BEGIN UFW AND DOCKER
@@ -72,12 +86,14 @@ fix_ufw_docker() {
 COMMIT
 # END UFW AND DOCKER
 EOF
+    else
+        echo "✔ after.rules 已存在，跳过写入"
     fi
 
     ufw --force enable
     systemctl restart ufw
 
-    echo "✔ 修复完成"
+    echo "✔ Docker + UFW 修复完成（SSH 已确认安全）"
 }
 
 allow_docker() {
@@ -118,9 +134,9 @@ reset_all() {
 
 menu() {
     clear
-    echo "Docker + UFW 防火墙管理脚本"
+    echo "Docker + UFW 防火墙管理脚本（SSH 安全版）"
     echo
-    echo "1) 修复 Docker + UFW（推荐第一次执行）"
+    echo "1) 修复 Docker + UFW（自动确认 SSH 端口）"
     echo "2) 仅开放 Docker 容器端口"
     echo "3) 仅关闭 Docker 容器端口"
     echo "4) 同时开放 宿主机 + 容器端口"
@@ -132,10 +148,10 @@ menu() {
 
     case "$choice" in
         1) fix_ufw_docker ;;
-        2) read -rp "端口: " p; allow_docker $p ;;
-        3) read -rp "端口: " p; deny_docker $p ;;
-        4) read -rp "端口: " p; allow_all $p ;;
-        5) read -rp "端口: " p; deny_all $p ;;
+        2) read -rp "端口（空格分隔）: " p; allow_docker $p ;;
+        3) read -rp "端口（空格分隔）: " p; deny_docker $p ;;
+        4) read -rp "端口（空格分隔）: " p; allow_all $p ;;
+        5) read -rp "端口（空格分隔）: " p; deny_all $p ;;
         6) reset_all ;;
         0) exit 0 ;;
         *) echo "❌ 无效选择" ;;
