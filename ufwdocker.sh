@@ -25,26 +25,14 @@ fix_ufw_docker() {
     echo "✔ 检测到 SSH 端口: $SSH_PORT，正在预放行..."
     ufw allow "$SSH_PORT"/tcp >/dev/null 2>&1 || true
 
-    # 设置 UFW 默认允许转发
-    sed -i 's/DEFAULT_FORWARD_POLICY="DROP"/DEFAULT_FORWARD_POLICY="ACCEPT"/' /etc/default/ufw
+    # 设置默认转发策略为 DROP
+    sed -i 's/DEFAULT_FORWARD_POLICY="ACCEPT"/DEFAULT_FORWARD_POLICY="DROP"/' /etc/default/ufw
 
-    # 确保 DOCKER-USER 链存在并清空
-    iptables -F DOCKER-USER 2>/dev/null || true
-    iptables -N DOCKER-USER 2>/dev/null || true
+    # 备份原 after.rules
+    mkdir -p "$BACKUP_DIR"
+    cp -f "$UFW_AFTER" "$BACKUP_DIR/after.rules.bak.$(date +%s)" 2>/dev/null || true
 
-    # 默认 DROP 所有宿主机到 Docker 容器端口流量
-    iptables -I DOCKER-USER -j DROP
-
-    # 允许特定端口 (修改这里可以增加允许的端口)
-    for p in 80 81 443 30754; do
-        iptables -I DOCKER-USER -p tcp --dport "$p" -j ACCEPT
-    done
-
-    # 允许宿主机访问 Docker 内部网络
-    iptables -I DOCKER-USER -s 172.0.0.0/8 -j RETURN
-    iptables -I DOCKER-USER -s 10.0.0.0/8 -j RETURN
-
-    # 可选：保留原 UFW after.rules 模板（防止 ufw reload 时丢失）
+    # 写入严格控制 Docker 端口规则
     cat > "$UFW_AFTER" <<'EOF'
 # BEGIN UFW AND DOCKER
 *filter
@@ -52,10 +40,16 @@ fix_ufw_docker() {
 :ufw-docker-logging-deny - [0:0]
 :DOCKER-USER - [0:0]
 -A DOCKER-USER -j ufw-user-forward
+
+# 允许私有网络互访
 -A DOCKER-USER -s 10.0.0.0/8 -j RETURN
 -A DOCKER-USER -s 172.16.0.0/12 -j RETURN
 -A DOCKER-USER -s 192.168.0.0/16 -j RETURN
+
+# 允许 DNS UDP 端口高于 1023
 -A DOCKER-USER -p udp --sport 53 --dport 1024:65535 -j RETURN
+
+# 严格阻止外部未授权访问
 -A DOCKER-USER -j ufw-docker-logging-deny
 -A ufw-docker-logging-deny -m limit --limit 3/min --limit-burst 10 -j LOG --log-prefix "[UFW DOCKER BLOCK] "
 -A ufw-docker-logging-deny -j DROP
@@ -63,9 +57,12 @@ COMMIT
 # END UFW AND DOCKER
 EOF
 
+    # 启用 UFW 并重启
     ufw --force enable
     systemctl restart ufw
+
     echo "✔ 环境修复完成，Docker 对外端口已严格控制，SSH端口 $SSH_PORT 已安全放行。"
+    echo "⚠ 如规则未生效，请重启服务器。"
 }
 
 # ==========================
