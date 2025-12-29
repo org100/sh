@@ -91,61 +91,80 @@ select_container_ip() {
 }
 
 # ==========================
-# 2) 开放容器端口 (支持多端口)
+# 核心处理：多端口循环执行
 # ==========================
-allow_docker() {
-    echo "▶ 只开放 Docker 容器端口 (不影响宿主机)"
-    local ip=$(select_container_ip)
-    read -rp "请输入端口 (支持空格分隔，如 80 443，留空为 any): " ports
-    ports=${ports:-any}
+handle_ports() {
+    local action=$1  # allow 或 delete
+    local ip=$2
+    local raw_ports
     
-    for port in $ports; do
-        if [ "$ip" == "any" ] && [ "$port" == "any" ]; then
-            ufw route allow from any to any
-        elif [ "$ip" == "any" ]; then
-            ufw route allow proto tcp from any to any port "$port"
-        elif [ "$port" == "any" ]; then
-            ufw route allow from any to "$ip"
+    read -rp "请输入端口 (支持空格分隔，如 80 81 443，留空为 any): " raw_ports
+    # 将输入转换为数组，处理多空格情况
+    read -ra port_array <<< "$raw_ports"
+    
+    # 如果输入为空，则处理为 any
+    if [ ${#port_array[@]} -eq 0 ]; then
+        port_array=("any")
+    fi
+
+    for port in "${port_array[@]}"; do
+        if [ "$action" == "allow" ]; then
+            if [ "$ip" == "any" ] && [ "$port" == "any" ]; then
+                ufw route allow from any to any
+            elif [ "$ip" == "any" ]; then
+                ufw route allow proto tcp from any to any port "$port"
+            elif [ "$port" == "any" ]; then
+                ufw route allow from any to "$ip"
+            else
+                ufw route allow proto tcp from any to "$ip" port "$port"
+            fi
+            echo "✔ 已添加规则: To: $ip Port: $port"
         else
-            ufw route allow proto tcp from any to "$ip" port "$port"
+            if [ "$ip" == "any" ] && [ "$port" == "any" ]; then
+                ufw route delete allow from any to any 2>/dev/null || true
+            elif [ "$ip" == "any" ]; then
+                ufw route delete allow proto tcp from any to any port "$port" 2>/dev/null || true
+            elif [ "$port" == "any" ]; then
+                ufw route delete allow from any to "$ip" 2>/dev/null || true
+            else
+                ufw route delete allow proto tcp from any to "$ip" port "$port" 2>/dev/null || true
+            fi
+            echo "✔ 已处理删除: To: $ip Port: $port"
         fi
-        echo "✔ 已添加规则: To: $ip Port: $port"
     done
 }
 
 # ==========================
-# 3) 关闭容器端口 (支持多端口)
+# 选项函数
 # ==========================
-deny_docker() {
-    echo "▶ 只关闭 Docker 容器端口 (不影响宿主机)"
+allow_docker() {
+    echo "▶ 只开放 Docker 容器端口"
     local ip=$(select_container_ip)
-    read -rp "请输入端口 (支持空格分隔，如 80 443，留空为 any): " ports
-    ports=${ports:-any}
-    
-    for port in $ports; do
-        if [ "$ip" == "any" ] && [ "$port" == "any" ]; then
-            ufw route delete allow from any to any 2>/dev/null || true
-        elif [ "$ip" == "any" ]; then
-            ufw route delete allow proto tcp from any to any port "$port" 2>/dev/null || true
-        elif [ "$port" == "any" ]; then
-            ufw route delete allow from any to "$ip" 2>/dev/null || true
-        else
-            ufw route delete allow proto tcp from any to "$ip" port "$port" 2>/dev/null || true
-        fi
-        echo "✔ 已处理删除: To: $ip Port: $port"
-    done
+    handle_ports "allow" "$ip"
+}
+
+deny_docker() {
+    echo "▶ 只关闭 Docker 容器端口"
+    local ip=$(select_container_ip)
+    handle_ports "deny" "$ip"
 }
 
 allow_all() {
     echo "▶ 同时开放宿主机 + 容器端口"
-    read -rp "请输入端口 (空格分隔): " ports
-    for p in $ports; do ufw allow "$p"; echo "✔ 开放宿主机端口: $p"; done
+    read -rp "请输入端口 (空格分隔): " -a ports
+    for p in "${ports[@]}"; do
+        ufw allow "$p"
+        echo "✔ 开放宿主机端口: $p"
+    done
 }
 
 deny_all() {
     echo "▶ 同时关闭宿主机 + 容器端口"
-    read -rp "请输入端口 (空格分隔): " ports
-    for p in $ports; do ufw delete allow "$p" 2>/dev/null || true; echo "✔ 删除宿主机端口: $p"; done
+    read -rp "请输入端口 (空格分隔): " -a ports
+    for p in "${ports[@]}"; do
+        ufw delete allow "$p" 2>/dev/null || true
+        echo "✔ 删除宿主机端口: $p"
+    done
 }
 
 reset_all() {
