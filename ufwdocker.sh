@@ -7,45 +7,29 @@ BACKUP_DIR="/root/ufw-backup"
 require_root() { [ "$EUID" -eq 0 ] || { echo "❌ 请使用 root 运行"; exit 1; } }
 pause() { echo ""; read -rp "按回车继续..." ; }
 
-# ==========================
-# SSH 端口检测
-# ==========================
 get_ssh_port() {
-    local port
-    if command -v sshd >/dev/null 2>&1; then
-        port=$(sshd -T 2>/dev/null | awk '/^port / {print $2; exit}')
-    fi
-    [ -z "$port" ] && port=22
-    echo "$port"
+    local port=$(sshd -T 2>/dev/null | awk '/^port / {print $2; exit}')
+    echo "${port:-22}"
 }
 
 # ==========================
-# 修复 Docker + UFW
+# 1) 修复 Docker + UFW 环境
 # ==========================
 fix_ufw_docker() {
-    echo "▶ 修复 Docker + UFW"
-    apt update -y
-    apt install -y ufw
-    mkdir -p "$BACKUP_DIR"
-    cp -a /etc/ufw "$BACKUP_DIR/" 2>/dev/null || true
-
+    echo "▶ 正在执行环境修复..."
+    apt update -y && apt install -y ufw
     SSH_PORT=$(get_ssh_port)
-    echo "✔ 检测到 SSH 端口: $SSH_PORT"
-
     ufw --force reset
     ufw default deny incoming
     ufw default allow outgoing
     ufw allow "$SSH_PORT"/tcp
-
-    # 写入 after.rules
-    if ! grep -q "BEGIN UFW AND DOCKER" "$UFW_AFTER"; then
-        cat > "$UFW_AFTER" <<'EOF'
+    
+    cat > "$UFW_AFTER" <<'EOF'
 # BEGIN UFW AND DOCKER
 *filter
 :ufw-user-forward - [0:0]
 :ufw-docker-logging-deny - [0:0]
 :DOCKER-USER - [0:0]
-
 -A DOCKER-USER -j ufw-user-forward
 -A DOCKER-USER -s 10.0.0.0/8 -j RETURN
 -A DOCKER-USER -s 172.16.0.0/12 -j RETURN
@@ -57,101 +41,89 @@ fix_ufw_docker() {
 COMMIT
 # END UFW AND DOCKER
 EOF
-        echo "✔ after.rules 已写入"
-    fi
-
     ufw --force enable
     systemctl restart ufw
-    echo "✔ Docker + UFW 修复完成"
+    echo "✔ 修复完成。"
 }
 
 # ==========================
-# 容器端口交互函数 (修复显示问题)
+# 统一的容器选择逻辑 (修复显示 + 编号映射)
 # ==========================
 select_container_ip() {
-    echo "正在获取 Docker 容器列表..."
-    echo "------------------------------------------------"
-    printf "%-4s | %-20s | %-15s | %-10s\n" "ID" "容器名称" "IP地址" "状态"
-    echo "------------------------------------------------"
+    echo -e "\n\033[32m--- 实时 Docker 容器列表 ---\033[0m"
     
-    local tmp_map="/tmp/docker_map.txt"
-    rm -f "$tmp_map"
-    
+    local map_file="/tmp/ufw_docker_map"
+    rm -f "$map_file"
+
     local i=1
-    # 使用 Here-string 避免子进程问题，确保输出实时显示
-    while IFS='|' read -r name state; do
+    printf "\033[33m%-3s | %-20s | %-15s | %s\033[0m\n" "ID" "NAMES" "IP" "STATUS"
+    
+    # 获取所有容器名，并逐一通过 inspect 获取详情
+    while read -r name; do
         [ -z "$name" ] && continue
-        
-        # 实时通过 inspect 获取 IP
         local ip=$(docker inspect -f '{{range .NetworkSettings.Networks}}{{.IPAddress}}{{end}}' "$name" | head -n 1)
         [ -z "$ip" ] && ip="Internal"
+        local status=$(docker inspect -f '{{.State.Status}}' "$name")
         
-        printf "%-4d | %-20s | %-15s | %-10s\n" "$i" "$name" "$ip" "$state"
+        # 强制立即打印到终端 /dev/tty
+        printf "%-3d | %-20s | %-15s | %s\n" "$i" "$name" "$ip" "$status" > /dev/tty
         
-        # 将编号映射存入临时文件
-        echo "$i|$ip|$name" >> "$tmp_map"
+        # 存入映射文件供后续编号匹配
+        echo "$i|$ip|$name" >> "$map_file"
         i=$((i+1))
-    done <<< "$(docker ps -a --format "{{.Names}}|{{.State}}")"
+    done <<< "$(docker ps -a --format "{{.Names}}")"
 
-    if [ ! -f "$tmp_map" ]; then
-        echo "❌ 当前没有 Docker 容器"
-        echo "any"
-        return
-    fi
+    echo " 0   | any (全部容器)"
+    echo -e "\033[32m----------------------------\033[0m"
 
-    echo " 0    | any (全部容器)"
-    echo "------------------------------------------------"
-
+    local choice
     while true; do
-        read -rp "请选择容器编号 (ID) 或直接输入名称 [默认 0]: " choice
+        read -rp "请选择编号 (ID) 或直接输入容器名 [默认 0 = any]: " choice
         choice=${choice:-0}
 
         if [ "$choice" == "0" ] || [ "$choice" == "any" ]; then
+            rm -f "$map_file"
             echo "any"
-            rm -f "$tmp_map"
             return
         fi
 
-        # 如果输入的是数字 ID
+        # 检查是否是数字 ID
         if [[ "$choice" =~ ^[0-9]+$ ]]; then
-            local target_ip=$(grep "^$choice|" "$tmp_map" | cut -d'|' -f2)
-            if [ -n "$target_ip" ]; then
-                echo "$target_ip"
-                rm -f "$tmp_map"
+            local res=$(grep "^$choice|" "$map_file" | cut -d'|' -f2 || true)
+            local cname=$(grep "^$choice|" "$map_file" | cut -d'|' -f3 || true)
+            if [ -n "$res" ]; then
+                echo -e "\033[32m✔ 已选择: $cname ($res)\033[0m" > /dev/tty
+                rm -f "$map_file"
+                echo "$res"
                 return
             fi
         fi
 
-        # 如果输入的是容器名称
+        # 检查是否直接输入了容器名
         if docker inspect "$choice" >/dev/null 2>&1; then
-            local target_ip=$(docker inspect -f '{{range .NetworkSettings.Networks}}{{.IPAddress}}{{end}}' "$choice" | head -n 1)
-            echo "${target_ip:-any}"
-            rm -f "$tmp_map"
+            local res=$(docker inspect -f '{{range .NetworkSettings.Networks}}{{.IPAddress}}{{end}}' "$choice" | head -n 1)
+            rm -f "$map_file"
+            echo "${res:-any}"
             return
         fi
 
-        echo "❌ 输入无效，请重新选择编号或输入名称"
+        echo "❌ 输入无效，请重新输入编号或名称。"
     done
 }
 
 ask_port() {
-    local port
-    while true; do
-        read -rp "请输入端口 (例如 80, 留空默认为 any): " port
-        port=${port:-any}
-        [[ -n "$port" ]] && break
-    done
-    echo "$port"
+    local p
+    read -rp "请输入端口 (例如 81, 留空默认为 any): " p
+    echo "${p:-any}"
 }
 
 # ==========================
-# 操作函数
+# 2) 开放容器端口
 # ==========================
 allow_docker() {
     echo "▶ 只开放 Docker 容器端口 (不影响宿主机)"
-    local ip port
-    ip=$(select_container_ip)
-    port=$(ask_port)
+    local ip=$(select_container_ip)
+    local port=$(ask_port)
     
     if [ "$ip" == "any" ] && [ "$port" == "any" ]; then
         ufw route allow from any to any
@@ -162,14 +134,16 @@ allow_docker() {
     else
         ufw route allow proto tcp from any to "$ip" port "$port"
     fi
-    echo "✔ 规则已成功添加: To: $ip Port: $port"
+    echo "✔ 规则已成功添加。"
 }
 
+# ==========================
+# 3) 关闭容器端口
+# ==========================
 deny_docker() {
     echo "▶ 只关闭 Docker 容器端口 (不影响宿主机)"
-    local ip port
-    ip=$(select_container_ip)
-    port=$(ask_port)
+    local ip=$(select_container_ip)
+    local port=$(ask_port)
     
     if [ "$ip" == "any" ] && [ "$port" == "any" ]; then
         ufw route delete allow from any to any 2>/dev/null || true
@@ -180,32 +154,43 @@ deny_docker() {
     else
         ufw route delete allow proto tcp from any to "$ip" port "$port" 2>/dev/null || true
     fi
-    echo "✔ 尝试删除规则完成"
+    echo "✔ 尝试删除规则完成。"
 }
 
+# ==========================
+# 4) 开放宿主机 + 容器端口
+# ==========================
 allow_all() {
     echo "▶ 同时开放宿主机 + 容器端口"
-    read -rp "请输入端口（空格分隔）: " ports
+    read -rp "请输入端口 (空格分隔): " ports
     for p in $ports; do ufw allow "$p"; done
+    echo "✔ 宿主机端口已开放。"
 }
 
+# ==========================
+# 5) 关闭宿主机 + 容器端口
+# ==========================
 deny_all() {
     echo "▶ 同时关闭宿主机 + 容器端口"
-    read -rp "请输入端口（空格分隔）: " ports
+    read -rp "请输入端口 (空格分隔): " ports
     for p in $ports; do ufw delete allow "$p" 2>/dev/null || true; done
+    echo "✔ 宿主机规则已清理。"
 }
 
+# ==========================
+# 6) 完全还原
+# ==========================
 reset_all() {
-    echo "▶ 完全还原系统"
+    echo "▶ 正在卸载 UFW 并还原规则..."
     ufw --force disable || true
     apt purge -y ufw || true
     rm -rf /etc/ufw
     systemctl restart docker
-    echo "✔ 已完全还原"
+    echo "✔ 系统已还原。"
 }
 
 # ==========================
-# 菜单
+# 主菜单
 # ==========================
 menu() {
     clear
@@ -213,11 +198,11 @@ menu() {
     echo "      Docker + UFW 防火墙管理脚本"
     echo "========================================"
     echo "1) 修复 Docker + UFW 环境"
-    echo "2) 只开放 Docker 容器端口 (不影响宿主机)"
-    echo "3) 只关闭 Docker 容器端口 (不影响宿主机)"
-    echo "4) 同时开放宿主机 + 容器端口"
-    echo "5) 同时关闭宿主机 + 容器端口"
-    echo "6) 完全还原（卸载 ufw / 清空规则）"
+    echo "2) 只开放 Docker 容器端口 (ufw route)"
+    echo "3) 只关闭 Docker 容器端口 (ufw route)"
+    echo "4) 同时开放宿主机 + 容器端口 (ufw allow)"
+    echo "5) 同时关闭宿主机 + 容器端口 (ufw delete)"
+    echo "6) 完全还原 (卸载 UFW)"
     echo "0) 退出"
     echo "========================================"
     read -rp "请选择 [0-6]: " choice
