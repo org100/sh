@@ -2,7 +2,7 @@
 set -e
 
 # ==========================
-# 配置文件
+# 配置文件与全局变量
 # ==========================
 UFW_AFTER="/etc/ufw/after.rules"
 BACKUP_DIR="/root/ufw-backup"
@@ -12,18 +12,17 @@ require_root() { [ "$EUID" -eq 0 ] || { echo "❌ 请使用 root 运行"; exit 1
 pause() { echo ""; read -rp "按回车继续..." ; }
 
 # ==========================
-# 严格的 IPv4 网络探测 (彻底解决粘连)
+# 增强的网络探测 (严格过滤 IPv4，解决粘连问题)
 # ==========================
 get_docker_network() {
     local net
-    # 使用 grep 强制只取 IPv4 格式，排除 IPv6
-    net=$(docker network inspect bridge --format '{{range .IPAM.Config}}{{.Subnet}}{{end}}' 2>/dev/null | grep -oE "\b([0-9]{1,3}\.){3}[0-9]{1,3}/[0-9]{1,2}\b" | head -n 1)
+    net=$(docker network inspect bridge --format '{{range .IPAM.Config}}{{.Subnet}} {{end}}' 2>/dev/null | grep -oE "\b([0-9]{1,3}\.){3}[0-9]{1,3}/[0-9]{1,2}\b" | head -n 1)
     echo "${net:-172.17.0.0/16}"
 }
 
 get_docker_gateway() {
     local gw
-    gw=$(docker network inspect bridge --format '{{range .IPAM.Config}}{{.Gateway}}{{end}}' 2>/dev/null | grep -oE "\b([0-9]{1,3}\.){3}[0-9]{1,3}\b" | head -n 1)
+    gw=$(docker network inspect bridge --format '{{range .IPAM.Config}}{{.Gateway}} {{end}}' 2>/dev/null | grep -oE "\b([0-9]{1,3}\.){3}[0-9]{1,3}\b" | head -n 1)
     echo "${gw:-172.17.0.1}"
 }
 
@@ -34,13 +33,13 @@ get_main_interface() {
 }
 
 # ==========================
-# 核心功能逻辑
+# 核心逻辑函数
 # ==========================
 
-# 1) 修复环境
+# 1) 修复 Docker + UFW 环境
 fix_ufw_docker() {
     echo "▶ 正在执行环境修复..."
-    # 自动切换到 nftables 兼容模式
+    # 自动识别并切换到 nftables 兼容模式
     if [ -f /proc/sys/net/netfilter/nf_tables_api_version ]; then
         update-alternatives --set iptables /usr/sbin/iptables-nft >/dev/null 2>&1 || true
     fi
@@ -82,7 +81,7 @@ COMMIT
 EOF
     ufw --force enable
     systemctl restart docker && systemctl restart ufw
-    echo "✔ 环境修复完成"
+    echo "✔ 环境修复完成！"
 }
 
 # 端口管理通用函数
@@ -110,12 +109,26 @@ manage_ports() {
 
 # 11) 网桥识别
 auto_allow_bridges() {
+    echo "▶ 自动识别自定义网桥..."
     docker network ls --filter driver=bridge --format "{{.Name}}" | while read -r net; do
         [ "$net" == "bridge" ] && continue
         local sub=$(docker network inspect "$net" --format '{{range .IPAM.Config}}{{.Subnet}}{{end}}' 2>/dev/null | grep -oE "\b([0-9]{1,3}\.){3}[0-9]{1,3}/[0-9]{1,2}\b" | head -n 1)
-        [ -n "$sub" ] && ufw allow in on "$net" from "$sub"
+        [ -n "$sub" ] && ufw allow in on "$net" from "$sub" && echo "✔ 已放行网桥: $net ($sub)"
     done
-    echo "✔ 网桥识别完成"
+}
+
+# 10) RackNerd IPv6 修复
+fix_ipv6() {
+    echo "[*] 正在执行 IPv6 修复..."
+    local iface=$(get_main_interface)
+    cat > "/etc/sysctl.d/99-racknerd-ipv6.conf" <<EOF
+net.ipv6.conf.all.autoconf = 0
+net.ipv6.conf.all.accept_ra = 0
+net.ipv6.conf.$iface.autoconf = 0
+net.ipv6.conf.$iface.accept_ra = 0
+EOF
+    sysctl --system
+    echo "✔ IPv6 修复配置已应用。"
 }
 
 # ==========================
@@ -137,7 +150,7 @@ select_container_ip() {
 }
 
 # ==========================
-# 菜单 (11 项完整对应)
+# 菜单 (补全至 11 项)
 # ==========================
 menu() {
     clear
@@ -152,7 +165,7 @@ menu() {
     echo "5) 关闭宿主机+容器端口 (外网→全封)"
     echo "6) 查看当前防火墙规则 (UFW+Docker)"
     echo "7) 持久化规则 (防止重启丢失)"
-    echo "8) 诊断工具 (排查环境问题)"
+    echo "8) 诊断工具 (排查环境与兼容性)"
     echo "9) 完全还原 (卸载 UFW 并清理)"
     echo "10) 安全修复 RackNerd IPv6"
     echo "11) 自动识别并放行所有 Docker 网桥"
@@ -165,19 +178,16 @@ menu() {
         3) manage_ports "container_only" "delete" "$(select_container_ip)" ;;
         4) manage_ports "host_and_container" "allow" "$(select_container_ip)" ;;
         5) manage_ports "host_and_container" "delete" "$(select_container_ip)" ;;
-        6) ufw status numbered; echo "--- Docker User Chain ---"; iptables -L DOCKER-USER -n --line-numbers ;;
+        6) ufw status numbered; echo "--- DOCKER-USER Chain ---"; iptables -L DOCKER-USER -n --line-numbers ;;
         7) apt install -y iptables-persistent && netfilter-persistent save ;;
-        8) iptables --version; ufw status; docker version; ip addr ;;
-        9) ufw --force disable; apt purge -y ufw; rm -rf /etc/ufw; systemctl restart docker; echo "✔ 已还原" ;;
-        10) 
-            local iface=$(get_main_interface)
-            cat > "/etc/sysctl.d/99-racknerd-ipv6.conf" <<EOF
-net.ipv6.conf.all.autoconf = 0
-net.ipv6.conf.all.accept_ra = 0
-net.ipv6.conf.$iface.autoconf = 0
-net.ipv6.conf.$iface.accept_ra = 0
-EOF
-            sysctl --system && echo "✔ IPv6 修复完成" ;;
+        8) iptables --version; ufw status verbose; docker network ls ;;
+        9) 
+            read -rp "⚠️ 确认完全卸载 UFW？(yes/no): " confirm
+            if [ "$confirm" == "yes" ]; then
+                ufw --force disable && apt purge -y ufw && rm -rf /etc/ufw
+                systemctl restart docker && echo "✔ UFW 已清理。"
+            fi ;;
+        10) fix_ipv6 ;;
         11) auto_allow_bridges ;;
         0) exit 0 ;;
         *) echo "❌ 无效选择" ;;
