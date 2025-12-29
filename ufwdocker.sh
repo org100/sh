@@ -28,23 +28,7 @@ fix_ufw_docker() {
     # 设置 UFW 默认允许转发
     sed -i 's/DEFAULT_FORWARD_POLICY="DROP"/DEFAULT_FORWARD_POLICY="ACCEPT"/' /etc/default/ufw
 
-    # 确保 DOCKER-USER 链存在并清空
-    iptables -F DOCKER-USER 2>/dev/null || true
-    iptables -N DOCKER-USER 2>/dev/null || true
-
-    # 默认 DROP 所有宿主机到 Docker 容器端口流量
-    iptables -I DOCKER-USER -j DROP
-
-    # 允许特定端口 (修改这里可以增加允许的端口)
-    for p in 80 81 443 30754; do
-        iptables -I DOCKER-USER -p tcp --dport "$p" -j ACCEPT
-    done
-
-    # 允许宿主机访问 Docker 内部网络
-    iptables -I DOCKER-USER -s 172.0.0.0/8 -j RETURN
-    iptables -I DOCKER-USER -s 10.0.0.0/8 -j RETURN
-
-    # 保留原 UFW after.rules 模板
+    # DOCKER-USER 链规则
     cat > "$UFW_AFTER" <<'EOF'
 # BEGIN UFW AND DOCKER
 *filter
@@ -119,7 +103,7 @@ select_container_ip() {
 }
 
 # ==========================
-# 多端口处理逻辑
+# 多端口处理逻辑 (支持删除 any 端口)
 # ==========================
 process_ports() {
     local action=$1
@@ -139,17 +123,25 @@ process_ports() {
         [ -z "$p" ] && p="any"
         echo "正在处理端口: $p -> $target_ip ..."
 
-        if [ "$target_ip" == "any" ]; then
-            # any 容器，不加 port，ufw route delete 语法合法
-            if [ "$action" == "allow" ]; then
-                ufw route allow from any to any
+        if [ "$action" == "allow" ]; then
+            if [ "$target_ip" == "any" ]; then
+                [ "$p" == "any" ] && ufw route allow from any to any || ufw route allow proto tcp from any to any port "$p"
             else
-                ufw route delete from any to any || true
+                [ "$p" == "any" ] && ufw route allow from any to "$target_ip" || ufw route allow proto tcp from any to "$target_ip" port "$p"
             fi
         else
-            # 指定容器 IP，允许/删除指定端口
-            if [ "$action" == "allow" ]; then
-                [ "$p" == "any" ] && ufw route allow from any to "$target_ip" || ufw route allow proto tcp from any to "$target_ip" port "$p"
+            # 删除规则
+            if [ "$target_ip" == "any" ]; then
+                if [ "$p" == "any" ]; then
+                    ufw route delete from any to any || true
+                else
+                    # 遍历 ufw route numbered 找到端口匹配的规则删除
+                    while true; do
+                        rule_num=$(ufw status numbered | grep "ALLOW.*$p" | awk -F'[][]' '{print $2}' | head -n 1)
+                        [ -z "$rule_num" ] && break
+                        ufw route delete "$rule_num" || true
+                    done
+                fi
             else
                 [ "$p" == "any" ] && ufw route delete from any to "$target_ip" || ufw route delete proto tcp from any to "$target_ip" port "$p" || true
             fi
@@ -157,36 +149,3 @@ process_ports() {
     done
     echo "✔ 端口处理完成。"
 }
-
-# ==========================
-# 菜单
-# ==========================
-menu() {
-    clear
-    echo "========================================"
-    echo "      Docker + UFW 防火墙管理脚本"
-    echo "========================================"
-    echo "1) 修复 Docker + UFW 环境 (严格控制端口)"
-    echo "2) 只开放 Docker 容器端口 (ufw route)"
-    echo "3) 只关闭 Docker 容器端口 (ufw route)"
-    echo "4) 同时开放宿主机 + 容器端口 (ufw allow)"
-    echo "5) 同时关闭宿主机 + 容器端口 (ufw delete)"
-    echo "6) 完全还原 (卸载 UFW)"
-    echo "0) 退出"
-    echo "========================================"
-    read -rp "请选择 [0-6]: " choice
-    case "$choice" in
-        1) fix_ufw_docker ;;
-        2) process_ports "allow" "$(select_container_ip)" ;;
-        3) process_ports "delete" "$(select_container_ip)" ;;
-        4) read -rp "输入端口: " ps; for p in $ps; do ufw allow "$p"; done ;;
-        5) read -rp "输入端口: " ps; for p in $ps; do ufw delete allow "$p" || true; done ;;
-        6) ufw --force disable && apt purge -y ufw && rm -rf /etc/ufw && systemctl restart docker ;;
-        0) exit 0 ;;
-    esac
-    pause
-    menu
-}
-
-require_root
-menu
