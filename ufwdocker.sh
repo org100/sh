@@ -41,7 +41,6 @@ fix_ufw_docker() {
     if ! grep -q "BEGIN UFW AND DOCKER" "$UFW_AFTER"; then
         cat > "$UFW_AFTER" <<'EOF'
 # BEGIN UFW AND DOCKER
-# 使用 DOCKER-USER 链控制 Docker 容器端口访问
 *filter
 :ufw-user-forward - [0:0]
 :ufw-docker-logging-deny - [0:0]
@@ -70,41 +69,44 @@ EOF
 # 容器端口交互函数（显示全部容器）
 # ==========================
 select_container_ip() {
-    local containers ips choice
-    containers=($(docker ps -a --format '{{.Names}}'))
-    ips=()
+    echo "正在获取 Docker 容器列表..."
+    local containers=()
+    local ips=()
+    local status=()
+    local choice
+
+    while IFS= read -r line; do
+        name=$(echo "$line" | awk '{print $1}')
+        st=$(echo "$line" | awk '{print $2}')
+        ip=$(docker inspect -f '{{range .NetworkSettings.Networks}}{{.IPAddress}}{{end}}' "$name")
+        [ -z "$ip" ] && ip="未分配IP"
+
+        containers+=("$name")
+        ips+=("$ip")
+        status+=("$st")
+    done < <(docker ps -a --format '{{.Names}} {{.State}}')
 
     if [ ${#containers[@]} -eq 0 ]; then
         echo "❌ 当前没有 Docker 容器"
-        echo "请输入 'any' 表示全部容器"
-        read -rp "容器 IP / 名称: " choice
+        read -rp "请输入 'any' 表示全部容器: " choice
         echo "$choice"
         return
     fi
 
-    for c in "${containers[@]}"; do
-        ip=$(docker inspect -f '{{range .NetworkSettings.Networks}}{{.IPAddress}}{{end}}' "$c")
-        [ -z "$ip" ] && ip="未分配IP"
-        st=$(docker inspect -f '{{.State.Status}}' "$c")
-        ips+=("$c:$ip:$st")
-    done
-
     echo "当前容器列表 (编号 + 名称 + IP + 状态):"
-    for i in "${!ips[@]}"; do
-        IFS=":" read -r name ip st <<< "${ips[$i]}"
-        echo "$((i+1))) $name | IP: $ip | 状态: $st"
+    for i in "${!containers[@]}"; do
+        echo "$((i+1))) ${containers[$i]} | IP: ${ips[$i]} | 状态: ${status[$i]}"
     done
     echo "0) any（全部容器）"
 
     while true; do
         read -rp "请选择容器编号（默认 0 = any）: " choice
         choice=${choice:-0}
-        if [[ "$choice" =~ ^[0-9]+$ ]] && (( choice >=0 && choice <= ${#ips[@]} )); then
+        if [[ "$choice" =~ ^[0-9]+$ ]] && (( choice >=0 && choice <= ${#containers[@]} )); then
             if [ "$choice" -eq 0 ]; then
                 echo "any"
             else
-                IFS=":" read -r name ip st <<< "${ips[$((choice-1))]}"
-                echo "$ip"
+                echo "${ips[$((choice-1))]}"
             fi
             return
         else
