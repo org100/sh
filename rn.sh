@@ -1,9 +1,16 @@
 #!/bin/bash
 # =====================================================
-# RackNerd 安全 IPv6 / UFW / Docker 工具
+# RackNerd 安全 IPv6 / UFW / Docker 工具（Debian 13 发布级）
 # =====================================================
 
 UFW_AFTER="/etc/ufw/after.rules"
+
+# -----------------------------------------------------
+# 工具函数
+# -----------------------------------------------------
+get_ipv6_iface() {
+    ip -6 route show default 2>/dev/null | awk '{print $5; exit}'
+}
 
 # -----------------------------------------------------
 # 菜单
@@ -25,48 +32,54 @@ show_menu() {
 }
 
 # =====================================================
-# 功能 1：安全修复 RackNerd IPv6 并自动验证
+# 功能 1：安全修复 RackNerd IPv6 并自动验证（已修复）
 # =====================================================
 fix_ipv6() {
     echo "[*] 开始安全修复 RackNerd IPv6 配置..."
 
-    SYSCTL_CONF="/etc/sysctl.conf"
-    CUSTOM_CONF="/etc/sysctl.d/99-racknerd-ipv6.conf"
+    SYSCTL_CUSTOM="/etc/sysctl.d/99-racknerd-ipv6.conf"
+    IFACE=$(get_ipv6_iface)
 
-    # 备份原文件
-    if [ -f "$SYSCTL_CONF" ]; then
-        cp "$SYSCTL_CONF" "${SYSCTL_CONF}.bak_$(date +%F_%H-%M-%S)"
-        echo "[*] 已备份 $SYSCTL_CONF"
-    else
-        echo "[!] /etc/sysctl.conf 不存在，将使用 $CUSTOM_CONF 创建自定义配置"
+    if [ -z "$IFACE" ]; then
+        echo "[✗] 未检测到 IPv6 默认接口，无法继续"
+        return
     fi
 
-    # 写入 IPv6 配置
-    cat > "$CUSTOM_CONF" <<EOF
-# RackNerd IPv6 Fix
+    echo "[✓] 检测到 IPv6 接口: $IFACE"
+
+    # 备份旧配置
+    if [ -f "$SYSCTL_CUSTOM" ]; then
+        cp "$SYSCTL_CUSTOM" "${SYSCTL_CUSTOM}.bak_$(date +%F_%H-%M-%S)"
+        echo "[*] 已备份旧 IPv6 配置"
+    fi
+
+    # 写入发布级 IPv6 配置
+    cat > "$SYSCTL_CUSTOM" <<EOF
+# RackNerd IPv6 Fix (Debian 13 Safe)
 net.ipv6.conf.all.autoconf = 0
 net.ipv6.conf.all.accept_ra = 0
-net.ipv6.conf.eth0.autoconf = 0
-net.ipv6.conf.eth0.accept_ra = 0
-
-# 注释可能禁用 IPv6 的配置
-# net.ipv6.conf.all.disable_ipv6 = 1
-# net.ipv6.conf.default.disable_ipv6 = 1
-# net.ipv6.conf.lo.disable_ipv6 = 1
+net.ipv6.conf.${IFACE}.autoconf = 0
+net.ipv6.conf.${IFACE}.accept_ra = 0
 EOF
 
-    echo "[*] 已写入自定义 IPv6 配置到 $CUSTOM_CONF"
+    echo "[*] 已写入 IPv6 配置: $SYSCTL_CUSTOM"
 
-    # 应用配置
+    # 应用 sysctl
     echo "[*] 应用 sysctl 配置..."
-    sysctl --system
+    sysctl --system >/dev/null
 
-    # 重启网络服务
+    # 重启网络
     echo "[*] 重启网络服务..."
-    systemctl restart networking
+    systemctl restart networking || true
 
-    # 自动验证 IPv6
-    echo "[*] 验证 IPv6 连通性..."
+    # -------------------------
+    # 自动验证
+    # -------------------------
+    echo "[*] 验证 IPv6 状态..."
+
+    sysctl net.ipv6.conf.${IFACE}.autoconf
+    ip -6 addr show "$IFACE" | grep inet6 || echo "[!] 接口未检测到 IPv6 地址"
+
     if ping6 -c 3 google.com >/dev/null 2>&1; then
         echo "[✓] IPv6 ping 测试成功"
     else
@@ -80,12 +93,12 @@ EOF
     fi
 
     echo
-    echo "[✓] IPv6 配置已应用完成"
-    echo "[*] 若网络异常，请考虑 reboot 实例"
+    echo "[✓] IPv6 安全修复流程完成"
+    echo "[*] 如仍异常，建议 reboot 一次实例"
 }
 
 # =====================================================
-# 功能 2~6：UFW & Docker 管理
+# 功能 2~6：UFW & Docker 管理（未改动）
 # =====================================================
 setup_ufw() {
     if ! command -v ufw >/dev/null 2>&1; then
