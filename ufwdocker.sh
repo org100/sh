@@ -27,69 +27,51 @@ get_main_interface() {
 }
 
 # =====================================================
-# 11) 自动识别并放行所有 Docker 真实网桥卡 (带详细实时提示)
+# 11) 自动识别并放行 Docker 网桥
 # =====================================================
 auto_allow_docker_bridges() {
     echo "------------------------------------------------"
-    echo "🔍 正在扫描所有 Docker 网络并自动配置 UFW 规则..."
+    echo "🔍 正在扫描 Docker bridge 网络..."
     local current_ufw_status=$(ufw status)
-    
-    # 查找所有 bridge 类型的网络
     local nets=$(docker network ls --filter driver=bridge --format "{{.Name}}")
-    
-    if [ -z "$nets" ]; then
-        echo "ℹ️  未检测到任何 Docker bridge 网络。"
-        return
-    fi
+
+    [ -z "$nets" ] && { echo "ℹ️ 未检测到 Docker bridge"; return; }
 
     echo "$nets" | while read -r net; do
         local iface subnet
-        if [ "$net" == "bridge" ]; then
+        if [ "$net" = "bridge" ]; then
             iface="docker0"
         else
-            # 提取真实 Bridge 名称 (如 br-xxxx)
-            iface=$(docker network inspect "$net" --format '{{index .Options "com.docker.network.bridge.name"}}' 2>/dev/null || echo "")
+            iface=$(docker network inspect "$net" --format '{{index .Options "com.docker.network.bridge.name"}}' 2>/dev/null)
             [ -z "$iface" ] && iface="br-$(docker network inspect "$net" --format '{{.Id}}' | cut -c1-12)"
         fi
-        
-        subnet=$(docker network inspect "$net" --format '{{range .IPAM.Config}}{{.Subnet}}{{end}}' 2>/dev/null | grep -oE "\b([0-9]{1,3}\.){3}[0-9]{1,3}/[0-9]{1,2}\b" | head -n 1)
-        
-        if [ -n "$iface" ] && [ -n "$subnet" ]; then
-            if echo "$current_ufw_status" | grep -q "$iface"; then
-                echo "⏭️  跳过: 网络 [$net] 对应的网卡 $iface ($subnet) 规则已存在"
-            else
-                ufw allow in on "$iface" from "$subnet" >/dev/null 2>&1 && \
-                echo "✅ 放行: 网络 [$net] -> 物理网卡 $iface ($subnet)"
-            fi
+
+        subnet=$(docker network inspect "$net" --format '{{range .IPAM.Config}}{{.Subnet}}{{end}}' | head -n1)
+
+        if echo "$current_ufw_status" | grep -q "$iface"; then
+            echo "⏭️ 已存在: $iface ($subnet)"
+        else
+            ufw allow in on "$iface" from "$subnet" >/dev/null 2>&1
+            echo "✅ 放行: $iface ($subnet)"
         fi
     done
-    echo "------------------------------------------------"
 }
 
 # =====================================================
-# 1) 修复 Docker + UFW 环境 (合并 SSH 提示与网桥自动化)
+# 1) 修复 Docker + UFW
 # =====================================================
 fix_ufw_docker() {
-    echo "▶ 正在执行环境修复..."
     apt update -y && apt install -y ufw nftables
 
-    # 【1】放行 SSH 端口
     local SSH_PORT=$(get_ssh_port)
-    echo "------------------------------------------------"
-    echo "🛡️  安全检测：当前系统 SSH 端口为: $SSH_PORT"
-    echo "🛡️  正在放行 $SSH_PORT/tcp，确保远程连接安全..."
-    echo "------------------------------------------------"
     ufw allow "$SSH_PORT"/tcp >/dev/null 2>&1 || true
 
-    # 【2】自动识别并放行所有 Docker 网桥 (调用带提示的函数)
     auto_allow_docker_bridges
 
-    # 【3】设置 UFW 默认允许转发
     sed -i 's/DEFAULT_FORWARD_POLICY="DROP"/DEFAULT_FORWARD_POLICY="ACCEPT"/' /etc/default/ufw
 
-    # 【4】写入 DOCKER-USER 核心劫持规则
     mkdir -p "$BACKUP_DIR"
-    [ -f "$UFW_AFTER" ] && cp "$UFW_AFTER" "$BACKUP_FILE" && echo "✔ 备份原配置: $BACKUP_FILE"
+    [ -f "$UFW_AFTER" ] && cp "$UFW_AFTER" "$BACKUP_FILE"
 
     cat > "$UFW_AFTER" <<EOF
 *filter
@@ -97,12 +79,10 @@ fix_ufw_docker() {
 :ufw-docker-logging-deny - [0:0]
 :DOCKER-USER - [0:0]
 
-# 局域网信任域 (放行私有网段直通)
 -A DOCKER-USER -s 10.0.0.0/8 -j RETURN
 -A DOCKER-USER -s 172.16.0.0/12 -j RETURN
 -A DOCKER-USER -s 192.168.0.0/16 -j RETURN
 
-# UFW 拦截核心
 -A DOCKER-USER -j ufw-user-forward
 -A DOCKER-USER -j ufw-docker-logging-deny
 -A ufw-docker-logging-deny -m limit --limit 3/min --limit-burst 10 -j LOG --log-prefix "[UFW DOCKER BLOCK] "
@@ -111,98 +91,87 @@ COMMIT
 EOF
 
     ufw --force enable
-    systemctl restart docker && systemctl restart ufw
-    echo ""
-    echo "🎉 环境修复成功完成！"
-    echo "💡 提示：SSH 端口 $SSH_PORT 及上述 Docker 网桥已纳入保护并放行。"
+    systemctl restart docker ufw
+    echo "🎉 Docker + UFW 修复完成"
 }
 
-# --------------------------
-# 端口管理模块 (2-5 项)
-# --------------------------
+# =====================================================
+# 端口管理
+# =====================================================
 select_container_ip() {
-    local i=1
-    local map_file="/tmp/ufw_docker_map"
-    rm -f "$map_file"
-    printf "\033[32m%-3s | %-20s | %-15s\033[0m\n" "ID" "NAME" "IPv4"
-    docker ps -a --format "{{.Names}}" | while read -r name; do
-        local ip=$(docker inspect -f '{{range .NetworkSettings.Networks}}{{.IPAddress}}{{end}}' "$name" | grep -oE "\b([0-9]{1,3}\.){3}[0-9]{1,3}\b" | head -n 1)
-        printf "%-3d | %-20s | %-15s\n" "$i" "$name" "${ip:-no-ip}"
-        echo "$i|${ip:-any}|$name" >> "$map_file"
+    local i=1 map="/tmp/ufw_map"
+    rm -f "$map"
+    printf "%-3s | %-20s | %-15s\n" ID NAME IPv4
+    docker ps -a --format "{{.Names}}" | while read -r n; do
+        ip=$(docker inspect -f '{{range .NetworkSettings.Networks}}{{.IPAddress}}{{end}}' "$n")
+        printf "%-3d | %-20s | %-15s\n" "$i" "$n" "${ip:-any}"
+        echo "$i|${ip:-any}" >> "$map"
         i=$((i+1))
     done
-    read -rp "请选择 ID (0 为 any): " choice
-    [ "${choice:-0}" == "0" ] && echo "any" || (grep "^$choice|" "$map_file" | cut -d'|' -f2 || echo "any")
+    read -rp "选择 ID (0=any): " c
+    [ "$c" = "0" ] && echo "any" || awk -F'|' "\$1==$c{print \$2}" "$map"
 }
 
 manage_ports() {
-    local mode=$1 
-    local action=$2 
-    local target_ip=$3
-    read -rp "请输入端口 (如 80 443): " port_input
-    for p in $port_input; do
-        if [ "$action" == "allow" ]; then
-            [ "$mode" == "host_and_container" ] && ufw allow "$p"/tcp
-            if [ "$target_ip" != "any" ]; then
-                iptables -I DOCKER-USER 1 -p tcp -d "$target_ip" --dport "$p" -j ACCEPT
-            fi
-        else
-            [ "$mode" == "host_and_container" ] && ufw delete allow "$p"/tcp || true
-            if [ "$target_ip" != "any" ]; then
-                iptables -D DOCKER-USER -p tcp -d "$target_ip" --dport "$p" -j ACCEPT 2>/dev/null || true
-            fi
-        fi
+    local mode=$1 action=$2 ip=$3
+    read -rp "端口: " ports
+    for p in $ports; do
+        [ "$action" = "allow" ] && ufw allow "$p"/tcp || ufw delete allow "$p"/tcp || true
+        [ "$ip" != "any" ] && iptables -I DOCKER-USER -p tcp -d "$ip" --dport "$p" -j ACCEPT 2>/dev/null || true
     done
-    echo "✔ 操作成功完成。"
 }
 
-# ==========================
-# 菜单定义 (11 项全部补齐)
-# ==========================
+# =====================================================
+# 菜单
+# =====================================================
 menu() {
     clear
-    echo "========================================"
-    echo "    Docker + UFW 防火墙管理脚本"
-    echo "    (Debian 13 十一项闭环增强版)"
-    echo "========================================"
-    echo "1) 修复 Docker + UFW 环境 (合并网桥自动化)"
-    echo "2) 开放容器端口 (仅外网→容器)"
-    echo "3) 关闭容器端口 (仅外网→容器)"
-    echo "4) 开放宿主机+容器端口 (外网→全通)"
-    echo "5) 关闭宿主机+容器端口 (外网→全封)"
-    echo "6) 查看规则 (UFW + DOCKER-USER)"
-    echo "7) 持久化规则 (防止重启丢失)"
-    echo "8) 诊断工具 (排查环境问题)"
-    echo "9) 完全还原 (卸载 UFW 并清理)"
+    echo "Docker + UFW 管理脚本 (Debian 13)"
+    echo "1) 修复 Docker + UFW"
+    echo "2) 开放容器端口"
+    echo "3) 关闭容器端口"
+    echo "4) 开放宿主机+容器端口"
+    echo "5) 关闭宿主机+容器端口"
+    echo "6) 查看规则"
+    echo "7) 持久化规则"
+    echo "8) 诊断"
+    echo "9) 完全还原"
     echo "10) 修复 RackNerd IPv6"
-    echo "11) 自动识别并放行新创建的 Docker 网桥"
+    echo "11) 放行 Docker 新网桥"
     echo "0) 退出"
-    echo "========================================"
-    read -rp "请选择 [0-11]: " choice
-    case "$choice" in
+    read -rp "选择: " c
+
+    case $c in
         1) fix_ufw_docker ;;
-        2) manage_ports "container_only" "allow" "$(select_container_ip)" ;;
-        3) manage_ports "container_only" "delete" "$(select_container_ip)" ;;
-        4) manage_ports "host_and_container" "allow" "$(select_container_ip)" ;;
-        5) manage_ports "host_and_container" "delete" "$(select_container_ip)" ;;
-        6) ufw status numbered; echo "--- DOCKER-USER 底层链 ---"; iptables -L DOCKER-USER -n --line-numbers ;;
+        2) manage_ports container allow "$(select_container_ip)" ;;
+        3) manage_ports container delete "$(select_container_ip)" ;;
+        4) manage_ports host allow "$(select_container_ip)" ;;
+        5) manage_ports host delete "$(select_container_ip)" ;;
+        6) ufw status numbered; iptables -L DOCKER-USER -n ;;
         7) apt install -y iptables-persistent && netfilter-persistent save ;;
-        8) iptables --version; ufw status; docker network ls; ip addr ;;
-        9) 
-            read -rp "⚠️  确认卸载 UFW？(yes/no): " res
-            [ "$res" == "yes" ] && { ufw --force disable; apt purge -y ufw; rm -rf /etc/ufw; systemctl restart docker; } ;;
-        10) 
-            local iface=$(get_main_interface)
-            cat > "/etc/sysctl.d/99-racknerd-ipv6.conf" <<EOF
+        8) ufw status; docker network ls; ip addr ;;
+        9) ufw --force disable; apt purge -y ufw ;;
+        10)
+            echo "🔧 修复 RackNerd IPv6"
+            cp /etc/sysctl.conf /etc/sysctl.conf.bak.$(date +%s)
+
+            sed -i '/racknerd ipv6 fix/d;/net.ipv6.conf.*autoconf/d;/net.ipv6.conf.*accept_ra/d' /etc/sysctl.conf
+
+            cat >> /etc/sysctl.conf <<'EOF'
+
+# racknerd ipv6 fix
 net.ipv6.conf.all.autoconf = 0
 net.ipv6.conf.all.accept_ra = 0
-net.ipv6.conf.$iface.autoconf = 0
-net.ipv6.conf.$iface.accept_ra = 0
+net.ipv6.conf.eth0.autoconf = 0
+net.ipv6.conf.eth0.accept_ra = 0
 EOF
-            sysctl --system && echo "✔ IPv6 修复完成" ;;
+            sysctl -p
+            systemctl restart networking
+            read -rp "是否立即 reboot？(yes/no): " r
+            [ "$r" = "yes" ] && reboot
+            ;;
         11) auto_allow_docker_bridges ;;
-        0) exit 0 ;;
-        *) echo "❌ 无效选择" ;;
+        0) exit ;;
     esac
     pause
     menu
