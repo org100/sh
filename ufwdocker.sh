@@ -15,40 +15,30 @@ pause() { echo ""; read -rp "按回车继续..." ; }
 # 辅助探测工具
 # --------------------------
 get_ssh_port() {
-    local port
-    port=$(sshd -T 2>/dev/null | awk '/^port / {print $2; exit}')
-    echo "${port:-22}"
+    sshd -T 2>/dev/null | awk '/^port / {print $2; exit}' || echo 22
 }
 
 get_main_interface() {
-    local interface
-    interface=$(ip route | grep default | awk '{print $5}' | head -n 1)
-    echo "${interface:-eth0}"
+    ip route | awk '/default/ {print $5; exit}' || echo eth0
 }
 
 # =====================================================
-# 11) 自动识别并放行 Docker 网桥
+# 11) 自动识别并放行 Docker bridge
 # =====================================================
 auto_allow_docker_bridges() {
     echo "------------------------------------------------"
-    echo "🔍 正在扫描 Docker bridge 网络..."
-    local current_ufw_status=$(ufw status)
-    local nets=$(docker network ls --filter driver=bridge --format "{{.Name}}")
-
-    [ -z "$nets" ] && { echo "ℹ️ 未检测到 Docker bridge"; return; }
-
-    echo "$nets" | while read -r net; do
-        local iface subnet
+    echo "🔍 扫描 Docker bridge 网络..."
+    local status=$(ufw status)
+    docker network ls --filter driver=bridge --format "{{.Name}}" | while read -r net; do
+        [ -z "$net" ] && continue
         if [ "$net" = "bridge" ]; then
             iface="docker0"
         else
             iface=$(docker network inspect "$net" --format '{{index .Options "com.docker.network.bridge.name"}}' 2>/dev/null)
             [ -z "$iface" ] && iface="br-$(docker network inspect "$net" --format '{{.Id}}' | cut -c1-12)"
         fi
-
         subnet=$(docker network inspect "$net" --format '{{range .IPAM.Config}}{{.Subnet}}{{end}}' | head -n1)
-
-        if echo "$current_ufw_status" | grep -q "$iface"; then
+        if echo "$status" | grep -q "$iface"; then
             echo "⏭️ 已存在: $iface ($subnet)"
         else
             ufw allow in on "$iface" from "$subnet" >/dev/null 2>&1
@@ -116,8 +106,13 @@ manage_ports() {
     local mode=$1 action=$2 ip=$3
     read -rp "端口: " ports
     for p in $ports; do
-        [ "$action" = "allow" ] && ufw allow "$p"/tcp || ufw delete allow "$p"/tcp || true
-        [ "$ip" != "any" ] && iptables -I DOCKER-USER -p tcp -d "$ip" --dport "$p" -j ACCEPT 2>/dev/null || true
+        if [ "$action" = "allow" ]; then
+            [ "$mode" != "container" ] && ufw allow "$p"/tcp
+            [ "$ip" != "any" ] && iptables -I DOCKER-USER -p tcp -d "$ip" --dport "$p" -j ACCEPT
+        else
+            [ "$mode" != "container" ] && ufw delete allow "$p"/tcp || true
+            [ "$ip" != "any" ] && iptables -D DOCKER-USER -p tcp -d "$ip" --dport "$p" -j ACCEPT 2>/dev/null || true
+        fi
     done
 }
 
@@ -126,7 +121,7 @@ manage_ports() {
 # =====================================================
 menu() {
     clear
-    echo "Docker + UFW 管理脚本 (Debian 13)"
+    echo "Docker + UFW 防火墙管理脚本"
     echo "1) 修复 Docker + UFW"
     echo "2) 开放容器端口"
     echo "3) 关闭容器端口"
@@ -141,7 +136,7 @@ menu() {
     echo "0) 退出"
     read -rp "选择: " c
 
-    case $c in
+    case "$c" in
         1) fix_ufw_docker ;;
         2) manage_ports container allow "$(select_container_ip)" ;;
         3) manage_ports container delete "$(select_container_ip)" ;;
@@ -152,10 +147,23 @@ menu() {
         8) ufw status; docker network ls; ip addr ;;
         9) ufw --force disable; apt purge -y ufw ;;
         10)
-            echo "🔧 修复 RackNerd IPv6"
-            cp /etc/sysctl.conf /etc/sysctl.conf.bak.$(date +%s)
+            echo "------------------------------------------------"
+            echo "🔧 修复 RackNerd IPv6（Debian 兼容版）"
+            echo "------------------------------------------------"
 
-            sed -i '/racknerd ipv6 fix/d;/net.ipv6.conf.*autoconf/d;/net.ipv6.conf.*accept_ra/d' /etc/sysctl.conf
+            if [ ! -f /etc/sysctl.conf ]; then
+                echo "ℹ️ /etc/sysctl.conf 不存在，正在创建"
+                touch /etc/sysctl.conf
+            else
+                cp /etc/sysctl.conf /etc/sysctl.conf.bak.$(date +%Y%m%d_%H%M%S)
+                echo "✔ 已备份 sysctl.conf"
+            fi
+
+            sed -i '/racknerd ipv6 fix/d' /etc/sysctl.conf
+            sed -i '/net.ipv6.conf.all.autoconf/d' /etc/sysctl.conf
+            sed -i '/net.ipv6.conf.all.accept_ra/d' /etc/sysctl.conf
+            sed -i '/net.ipv6.conf.eth0.autoconf/d' /etc/sysctl.conf
+            sed -i '/net.ipv6.conf.eth0.accept_ra/d' /etc/sysctl.conf
 
             cat >> /etc/sysctl.conf <<'EOF'
 
@@ -165,10 +173,12 @@ net.ipv6.conf.all.accept_ra = 0
 net.ipv6.conf.eth0.autoconf = 0
 net.ipv6.conf.eth0.accept_ra = 0
 EOF
+
             sysctl -p
             systemctl restart networking
-            read -rp "是否立即 reboot？(yes/no): " r
-            [ "$r" = "yes" ] && reboot
+
+            read -rp "⚠️ 是否立即 reboot？(yes/no): " r
+            [ "$r" = "yes" ] && reboot || echo "ℹ️ 请稍后手动 reboot"
             ;;
         11) auto_allow_docker_bridges ;;
         0) exit ;;
