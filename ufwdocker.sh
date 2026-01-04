@@ -116,7 +116,9 @@ check_ipv6_status() {
     local fail=0
 
     sysctl -n net.ipv6.conf.all.autoconf 2>/dev/null | grep -q '^0$' || fail=1
+    sysctl -n net.ipv6.conf.all.accept_ra 2>/dev/null | grep -q '^0$' || fail=1
     sysctl -n net.ipv6.conf."$iface".autoconf 2>/dev/null | grep -q '^0$' || fail=1
+    sysctl -n net.ipv6.conf."$iface".accept_ra 2>/dev/null | grep -q '^0$' || fail=1
 
     ip -6 addr show "$iface" | grep -q inet6 || fail=1
     ip -6 route | grep -q default || fail=1
