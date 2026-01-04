@@ -21,7 +21,11 @@ get_ssh_port() {
 }
 
 get_main_interface() {
-    ip route | awk '/default/ {print $5; exit}' || echo eth0
+    ip route | awk '/default/ {print $5; exit}'
+}
+
+get_ipv6_iface() {
+    ip -6 route show default 2>/dev/null | awk '{print $5; exit}'
 }
 
 # =====================================================
@@ -30,16 +34,21 @@ get_main_interface() {
 auto_allow_docker_bridges() {
     echo "------------------------------------------------"
     echo "🔍 扫描 Docker bridge 网络..."
-    local status=$(ufw status)
+    local status
+    status=$(ufw status)
+
     docker network ls --filter driver=bridge --format "{{.Name}}" | while read -r net; do
         [ -z "$net" ] && continue
+
         if [ "$net" = "bridge" ]; then
             iface="docker0"
         else
             iface=$(docker network inspect "$net" --format '{{index .Options "com.docker.network.bridge.name"}}' 2>/dev/null)
             [ -z "$iface" ] && iface="br-$(docker network inspect "$net" --format '{{.Id}}' | cut -c1-12)"
         fi
+
         subnet=$(docker network inspect "$net" --format '{{range .IPAM.Config}}{{.Subnet}}{{end}}' | head -n1)
+
         if echo "$status" | grep -q "$iface"; then
             echo "⏭️ 已存在: $iface ($subnet)"
         else
@@ -55,7 +64,8 @@ auto_allow_docker_bridges() {
 fix_ufw_docker() {
     apt update -y && apt install -y ufw nftables
 
-    local SSH_PORT=$(get_ssh_port)
+    local SSH_PORT
+    SSH_PORT=$(get_ssh_port)
     ufw allow "$SSH_PORT"/tcp >/dev/null 2>&1 || true
 
     auto_allow_docker_bridges
@@ -88,24 +98,31 @@ EOF
 }
 
 # =====================================================
-# 🧪 IPv6 生效检测
+# 🧪 IPv6 生效检测（发布级）
 # =====================================================
 check_ipv6_status() {
     echo "------------------------------------------------"
     echo "🧪 IPv6 生效检测"
     echo "------------------------------------------------"
 
+    local iface
+    iface=$(get_ipv6_iface)
+
+    if [ -z "$iface" ]; then
+        echo "❌ 未检测到 IPv6 默认接口"
+        return
+    fi
+
     local fail=0
 
-    for k in net.ipv6.conf.eth0.autoconf net.ipv6.conf.eth0.accept_ra; do
-        [ "$(sysctl -n "$k" 2>/dev/null)" = "0" ] || fail=1
-    done
+    sysctl -n net.ipv6.conf.all.autoconf 2>/dev/null | grep -q '^0$' || fail=1
+    sysctl -n net.ipv6.conf."$iface".autoconf 2>/dev/null | grep -q '^0$' || fail=1
 
-    ip -6 addr show eth0 | grep -q inet6 || fail=1
+    ip -6 addr show "$iface" | grep -q inet6 || fail=1
     ip -6 route | grep -q default || fail=1
 
     if [ "$fail" -eq 0 ]; then
-        echo "✅ IPv6 已真正生效"
+        echo "✅ IPv6 已真正生效（接口：$iface）"
     else
         echo "❌ IPv6 未完全生效（强烈建议 reboot）"
     fi
@@ -169,24 +186,25 @@ menu() {
     case "$c" in
         1) fix_ufw_docker ;;
         10)
-            if [ ! -f "$SYSCTL_CONF" ]; then
-                touch "$SYSCTL_CONF"
-            else
+            iface=$(get_ipv6_iface)
+            [ -z "$iface" ] && { echo "❌ 未检测到 IPv6 接口"; break; }
+
+            [ ! -f "$SYSCTL_CONF" ] && touch "$SYSCTL_CONF" || \
                 cp "$SYSCTL_CONF" "$SYSCTL_CONF.bak.$(date +%s)"
-            fi
 
             sed -i '/racknerd ipv6 fix/d;/net.ipv6.conf.*autoconf/d;/net.ipv6.conf.*accept_ra/d' "$SYSCTL_CONF"
 
-            cat >> "$SYSCTL_CONF" <<'EOF'
+            cat >> "$SYSCTL_CONF" <<EOF
 
 # racknerd ipv6 fix
 net.ipv6.conf.all.autoconf = 0
 net.ipv6.conf.all.accept_ra = 0
-net.ipv6.conf.eth0.autoconf = 0
-net.ipv6.conf.eth0.accept_ra = 0
+net.ipv6.conf.${iface}.autoconf = 0
+net.ipv6.conf.${iface}.accept_ra = 0
 EOF
-            sysctl -p
-            systemctl restart networking
+
+            sysctl -p || true
+            systemctl restart networking || true
             check_ipv6_status
             ;;
         11) auto_allow_docker_bridges ;;
