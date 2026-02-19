@@ -1,0 +1,14 @@
+# region detect
+domainSuffix:gspe1-ssl.ls.apple.com
+
+# Vodafone UK ePDG / WiFi Calling
+domainSuffix:epdg.epc.mnc015.mcc234.pub.3gppnetwork.org
+domainSuffix:ss.epdg.epc.mnc015.mcc234.pub.3gppnetwork.org
+domainSuffix:ss.epdg.epc.geo.mnc015.mcc234.pub.3gppnetwork.org
+domainSuffix:entsrv-uk.vodafone.com
+domainSuffix:vuk-gto.prod.ondemandconnectivity.com
+
+# IP ranges
+ip:88.82.0.0/19
+ip:46.68.0.0/17
+ip:87.194.0.0/16
