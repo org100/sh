@@ -24,7 +24,7 @@ Url: 粘贴你刚才在 GitHub 复制的 Raw 链接。
 
 # wifi-call.list  用于shadowrocket 规则集合
 
-# xray的config 配置方法
+# xray的 wifi-call config 配置方法
 
 插入到你 config.json 的 "routing" -> "rules" 数组中 下面是整个 routing 段
 
