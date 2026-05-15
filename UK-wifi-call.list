@@ -1,13 +1,78 @@
-# 地区检测
-DOMAIN-SUFFIX, gspe1-ssl.ls.apple.com
-# 沃达丰
-DOMAIN-SUFFIX, epdg.epc.mnc015.mcc234.pub.3gppnetwork.org
-DOMAIN-SUFFIX, ss.epdg.epc.mnc015.mcc234.pub.3gppnetwork.org
-DOMAIN-SUFFIX, ss.epdg.epc.geo.mnc015.mcc234.pub.3gppnetwork.org
-DOMAIN-SUFFIX, entsrv-uk.vodafone.com
-DOMAIN-SUFFIX, vuk-gto.prod.ondemandconnectivity.com
-IP-CIDR,88.82.0.0/19
-# CMLinkUK EE
-IP-CIDR,46.68.0.0/17
-# Giffgaff
-IP-CIDR,87.194.0.0/16
+# =========================================
+# 0. 苹果设备基础资格审查 (全球通用，必须有)
+# =========================================
+DOMAIN-SUFFIX,gspe1-ssl.ls.apple.com
+
+# =========================================
+# 1. 🇬🇧 英国 (UK) - MCC: 234
+# =========================================
+# EE / CMLink UK / BT Mobile
+DOMAIN-KEYWORD,epdg.epc.mnc030.mcc234
+DOMAIN-KEYWORD,epdg.epc.mnc033.mcc234
+IP-CIDR,31.94.0.0/16,no-resolve
+IP-CIDR,46.68.0.0/17,no-resolve
+# Vodafone / Lebara UK
+DOMAIN-KEYWORD,epdg.epc.mnc015.mcc234
+DOMAIN-SUFFIX,entsrv-uk.vodafone.com
+DOMAIN-SUFFIX,vuk-gto.prod.ondemandconnectivity.com
+IP-CIDR,88.82.0.0/19,no-resolve
+# Three UK (3网) / Smarty
+DOMAIN-KEYWORD,epdg.epc.mnc020.mcc234
+# O2 / Giffgaff
+DOMAIN-KEYWORD,epdg.epc.mnc010.mcc234
+IP-CIDR,87.194.0.0/16,no-resolve
+
+# =========================================
+# 2. 🇺🇸 美国 (US) - MCC: 310 / 311 / 312
+# =========================================
+# T-Mobile US / Ultra Mobile / PayGo
+DOMAIN-KEYWORD,epdg.epc.mnc240.mcc310
+DOMAIN-KEYWORD,epdg.epc.mnc260.mcc310
+DOMAIN-SUFFIX,ss.epdg.epc.mnc260.mcc310.pub.3gppnetwork.org
+IP-CIDR,208.54.0.0/16,no-resolve
+IP-CIDR,66.94.0.0/19,no-resolve
+# AT&T
+DOMAIN-KEYWORD,epdg.epc.mnc410.mcc310
+DOMAIN-KEYWORD,epdg.epc.mnc150.mcc311
+DOMAIN-SUFFIX,attwifi.com
+# Verizon
+DOMAIN-KEYWORD,epdg.epc.mnc480.mcc311
+DOMAIN-KEYWORD,epdg.epc.mnc012.mcc311
+DOMAIN-SUFFIX,vzwwo.com
+
+# =========================================
+# 3. 🇭🇰 香港 (HK) - MCC: 454
+# =========================================
+# CSL / ClubSIM
+DOMAIN-KEYWORD,epdg.epc.mnc000.mcc454
+# 3HK (香港和记) / DIY SIM
+DOMAIN-KEYWORD,epdg.epc.mnc003.mcc454
+DOMAIN-KEYWORD,epdg.epc.mnc004.mcc454
+# SmarTone (数码通)
+DOMAIN-KEYWORD,epdg.epc.mnc006.mcc454
+DOMAIN-KEYWORD,epdg.epc.mnc017.mcc454
+# CMHK (中国移动香港) / 万众
+DOMAIN-KEYWORD,epdg.epc.mnc012.mcc454
+DOMAIN-KEYWORD,epdg.epc.mnc013.mcc454
+
+# =========================================
+# 4. 🇸🇬 新加坡 (SG) - MCC: 525
+# =========================================
+# Singtel (新电信)
+DOMAIN-KEYWORD,epdg.epc.mnc001.mcc525
+DOMAIN-KEYWORD,epdg.epc.mnc002.mcc525
+# StarHub (星和)
+DOMAIN-KEYWORD,epdg.epc.mnc005.mcc525
+# M1
+DOMAIN-KEYWORD,epdg.epc.mnc003.mcc525
+
+# =========================================
+# 5. 新西兰 (NZ) - MCC: 530 (如 Skinny)
+# =========================================
+DOMAIN-KEYWORD,epdg.epc.mnc005.mcc530
+DOMAIN-KEYWORD,epdg.epc.mnc024.mcc530
+
+# =========================================
+# 兜底通用规则 (如果不确定具体的 MNC 编号)
+# =========================================
+DOMAIN-SUFFIX,pub.3gppnetwork.org
