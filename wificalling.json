@@ -1,0 +1,22 @@
+[
+  {
+    "outboundTag": "proxy",
+    "domain": [
+      "domain:gspe1-ssl.ls.apple.com",
+      "domain:entsrv-uk.vodafone.com",
+      "domain:vuk-gto.prod.ondemandconnectivity.com",
+      "domain:attwifi.com",
+      "domain:vzwwo.com",
+      "domain:pub.3gppnetwork.org",
+      "keyword:epdg.epc.mnc"
+    ],
+    "ip": [
+      "31.94.0.0/16",
+      "46.68.0.0/17",
+      "88.82.0.0/19",
+      "87.194.0.0/16",
+      "208.54.0.0/16",
+      "66.94.0.0/19"
+    ]
+  }
+]
