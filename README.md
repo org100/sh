@@ -22,6 +22,12 @@ Url: 粘贴你刚才在 GitHub 复制的 Raw 链接。
 
 添加完成后，右键点击这条你刚建好的订阅，选择 “更新订阅”（或者点击界面上的“下载/更新”按钮）。如果提示下载成功，说明 v2rayN 已经成功读取了你的 GitHub 规则。
 
+总结一下：电脑 v2rayn 分享socks5 端口给手机
+
+普通上网 ➡️ 电脑开“允许局域网”，手机连同路由填代理，不开 TUN。
+
+Wi-Fi Calling ➡️ 电脑开热点，v2rayN 开启 TUN，手机连热点不填代理。
+
 # wifi-call.list  用于shadowrocket 规则集合
 
 # xray的 wifi-call config 配置方法
